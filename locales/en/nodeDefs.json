@@ -1,0 +1,119 @@
+{
+  "LongvideoH3Studio": {
+    "display_name": "MiniMaxH3长视频操作台（longvideo)",
+    "inputs": {
+      "clip_name": {
+        "name": "CLIP model"
+      },
+      "video_vae_name": {
+        "name": "video VAE"
+      },
+      "audio_vae_name": {
+        "name": "audio VAE"
+      },
+      "aspect": {
+        "name": "aspect ratio",
+        "options": {
+          "adaptive": "adaptive",
+          "16:9": "16:9",
+          "9:16": "9:16",
+          "3:2": "3:2",
+          "2:3": "2:3",
+          "4:3": "4:3",
+          "3:4": "3:4",
+          "1:1": "1:1",
+          "21:9": "21:9"
+        }
+      },
+      "megapixels": {
+        "name": "megapixels"
+      },
+      "prompt_override": {
+        "name": "prompt"
+      },
+      "refmods_json": {
+        "name": "RefMod rows"
+      },
+      "segments_json": {
+        "name": "segment table"
+      },
+      "ref_image_size": {
+        "name": "Reference image size"
+      },
+      "audio_mode": {
+        "name": "Audio reference",
+        "options": {
+          "lock_source": "Original audio output",
+          "reference_only": "Timbre reference",
+          "native": "Free generation"
+        }
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "segments"
+      }
+    }
+  },
+  "LongvideoH3LongVideo": {
+    "display_name": "MiniMax-H3 长视频分段采样（longvideo）",
+    "inputs": {
+      "model": {
+        "name": "model"
+      },
+      "segments": {
+        "name": "segments"
+      },
+      "steps": {
+        "name": "steps"
+      },
+      "shift_video": {
+        "name": "video shift"
+      },
+      "shift_audio": {
+        "name": "audio shift"
+      },
+      "sampler_name": {
+        "name": "sampler"
+      },
+      "scheduler": {
+        "name": "scheduler"
+      },
+      "seed": {
+        "name": "seed"
+      },
+      "seed_policy": {
+        "name": "seed policy"
+      },
+      "cfg": {
+        "name": "cfg"
+      },
+      "release_clip": {
+        "name": "release CLIP between segments"
+      },
+      "free_between_segments": {
+        "name": "free cache between segments"
+      },
+      "context_noise": {
+        "name": "Context noise"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "frames"
+      },
+      "1": {
+        "name": "audio"
+      },
+      "2": {
+        "name": "last_frame"
+      },
+      "3": {
+        "name": "report"
+      },
+      "4": {
+        "name": "segment_info"
+      }
+    }
+  }
+}

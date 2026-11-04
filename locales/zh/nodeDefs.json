@@ -1,0 +1,119 @@
+{
+  "LongvideoH3Studio": {
+    "display_name": "MiniMaxH3长视频操作台（longvideo)",
+    "inputs": {
+      "clip_name": {
+        "name": "CLIP模型"
+      },
+      "video_vae_name": {
+        "name": "视频 VAE"
+      },
+      "audio_vae_name": {
+        "name": "音频 VAE"
+      },
+      "aspect": {
+        "name": "宽高比例",
+        "options": {
+          "adaptive": "自适应",
+          "16:9": "16:9",
+          "9:16": "9:16",
+          "3:2": "3:2",
+          "2:3": "2:3",
+          "4:3": "4:3",
+          "3:4": "3:4",
+          "1:1": "1:1",
+          "21:9": "21:9"
+        }
+      },
+      "megapixels": {
+        "name": "百万像素"
+      },
+      "prompt_override": {
+        "name": "提示词"
+      },
+      "refmods_json": {
+        "name": "RefMod 列表"
+      },
+      "segments_json": {
+        "name": "分段配置"
+      },
+      "ref_image_size": {
+        "name": "Reference image size"
+      },
+      "audio_mode": {
+        "name": "音频参考模式",
+        "options": {
+          "lock_source": "原声输出",
+          "reference_only": "音色参考",
+          "native": "自由生成"
+        }
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "segments"
+      }
+    }
+  },
+  "LongvideoH3LongVideo": {
+    "display_name": "MiniMax-H3 长视频分段采样（longvideo）",
+    "inputs": {
+      "model": {
+        "name": "模型"
+      },
+      "segments": {
+        "name": "分段计划"
+      },
+      "steps": {
+        "name": "步数"
+      },
+      "shift_video": {
+        "name": "视频偏移"
+      },
+      "shift_audio": {
+        "name": "音频偏移"
+      },
+      "sampler_name": {
+        "name": "采样器"
+      },
+      "scheduler": {
+        "name": "调度器"
+      },
+      "seed": {
+        "name": "种子"
+      },
+      "seed_policy": {
+        "name": "分段种子策略"
+      },
+      "cfg": {
+        "name": "CFG"
+      },
+      "release_clip": {
+        "name": "分段间释放文本编码器"
+      },
+      "free_between_segments": {
+        "name": "分段间释放缓存"
+      },
+      "context_noise": {
+        "name": "Context noise"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "图像"
+      },
+      "1": {
+        "name": "音频"
+      },
+      "2": {
+        "name": "尾帧"
+      },
+      "3": {
+        "name": "报告"
+      },
+      "4": {
+        "name": "分段信息"
+      }
+    }
+  }
+}
