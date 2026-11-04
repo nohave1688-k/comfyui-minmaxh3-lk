@@ -618,7 +618,7 @@ def _fix_regenerate_audio_noise(noise, av_latent, sigma_video, shift_video, shif
     noise_scale = float(getattr(sampling_obj, "noise_scale", 1.0) or 1.0)
     corrected = (
         sigma_audio * noise_audio.float()
-        + (sigma_video - sigma_audio) * clean_audio.float()
+        + (sigma_video - sigma_audio) * clean_audio.float().to(device=noise_audio.device)
     ) / max(1e-6, sigma_video * noise_scale)
     return comfy.nested_tensor.NestedTensor((noise_video, corrected.to(noise_audio.dtype)))
 
@@ -756,6 +756,9 @@ def _assemble_refined_latent(refine_latent, layout, collected, start, end):
     video, audio = nested_av_parts(refine_latent)
     ref_vmask, ref_amask = _collapse_av_mask(refine_latent)
     refined_by_segment = {item["segment"]: item for item in collected}
+    # Collected tensors are CPU copies; bring the untouched input slices onto
+    # the same device so the concatenation cannot fail on GPU-resident latents.
+    target_device = collected[0]["video"].device if collected else video.device
     video_parts = []
     audio_parts = []
     video_masks = []
@@ -768,17 +771,23 @@ def _assemble_refined_latent(refine_latent, layout, collected, start, end):
             video_masks.append(refined["video_mask"])
             audio_masks.append(refined["audio_mask"])
             continue
-        v_slice = video[..., entry["video_offset"]:entry["video_offset"] + entry["video_tokens"], :, :]
-        a_slice = audio[..., entry["audio_offset"]:entry["audio_offset"] + entry["audio_steps"]]
+        v_slice = video[
+            ..., entry["video_offset"]:entry["video_offset"] + entry["video_tokens"], :, :
+        ].detach().to(device=target_device)
+        a_slice = audio[
+            ..., entry["audio_offset"]:entry["audio_offset"] + entry["audio_steps"]
+        ].detach().to(device=target_device)
         video_parts.append(v_slice)
         audio_parts.append(a_slice)
         video_masks.append(
             None if ref_vmask is None
             else ref_vmask[..., entry["video_offset"]:entry["video_offset"] + entry["video_tokens"], :, :]
+                .detach().to(device=target_device)
         )
         audio_masks.append(
             None if ref_amask is None
             else ref_amask[..., entry["audio_offset"]:entry["audio_offset"] + entry["audio_steps"]]
+                .detach().to(device=target_device)
         )
     out = {
         "samples": comfy.nested_tensor.NestedTensor(
@@ -803,12 +812,12 @@ def _assemble_refined_latent(refine_latent, layout, collected, start, end):
             filled_video_masks.append(
                 vmask if vmask is not None
                 else torch.ones((video.shape[0], 1, tokens, video.shape[3], video.shape[4]),
-                                device=video.device, dtype=video.dtype)
+                                device=target_device, dtype=video.dtype)
             )
             filled_audio_masks.append(
                 amask if amask is not None
                 else torch.ones((audio.shape[0], 1, audio.shape[2], steps),
-                                device=audio.device, dtype=audio.dtype)
+                                device=target_device, dtype=audio.dtype)
             )
         out["noise_mask"] = comfy.nested_tensor.NestedTensor(
             (torch.cat(filled_video_masks, dim=2), torch.cat(filled_audio_masks, dim=-1))

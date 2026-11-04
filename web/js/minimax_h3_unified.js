@@ -78,6 +78,19 @@ function resolveConnTarget(node, segNumber, kind) {
     console.debug("[LK resolve] -> null");
     return null;
 }
+/* elementFromPoint returns the panel's widget-container DIV (it overlays the
+   buttons), whose subtree contains the button but closest() only walks
+   ancestors — so hit-testing must be geometric against button rects. */
+function connButtonAt(x, y, nodeId) {
+    for (const b of document.querySelectorAll("[data-conn-seg]")) {
+        const r = b.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) continue;
+        if (x < r.left || x > r.right || y < r.top || y > r.bottom) continue;
+        if (nodeId != null && b.dataset.connNodeId !== String(nodeId)) continue;
+        return b;
+    }
+    return null;
+}
 function connDisconnectKind(node, segNumber, kind) {
     for (const name of connSocketNames(segNumber, kind)) {
         const index = node.inputs?.findIndex((inp) => inp.name === name);
@@ -4626,8 +4639,8 @@ function setupConnDropBridge() {
         const link = lc.renderLinks?.at(0);
         const sourceType = String(link?.fromSlot?.type || "").toUpperCase();
         const srcNode = app.graph.getNodeById(link?.node?.id ?? -1);
-        const button = document.elementFromPoint(e.clientX, e.clientY)?.closest("[data-conn-seg]");
-        if (!button || button.dataset.connNodeId !== String(srcNode?.id ?? "-1")) { clearHover(); return; }
+        const button = connButtonAt(e.clientX, e.clientY, srcNode?.id);
+        if (!button) { clearHover(); return; }
         const spec = CONN_MEDIA_KINDS[button.dataset.connKind];
         if (!spec || !spec.types.includes(sourceType)) { clearHover(); return; }
         if (hoveredButton !== button) {
@@ -4713,6 +4726,9 @@ function setupConnDropBridge() {
         e.stopPropagation?.();
         setTimeout(() => {
             const ok = connectDrop(node, Number(button.dataset.connSeg), button.dataset.connKind, snapshot, button);
+            // we swallowed the pointerup, so litegraph never cleaned up its own
+            // drag state — reset to kill the floating link either way
+            lc.reset?.(true);
             if (ok) node.setDirtyCanvas?.(true, true);
         }, 30);
     }, true);
@@ -4760,10 +4776,11 @@ function setupConnDropBridge() {
         const clientX = pointer.clientX ?? (Number.isFinite(pointer.canvasX) ? Math.round(canvasRect.left + pointer.canvasX) : pointer.sourceEvent?.clientX);
         const clientY = pointer.clientY ?? (Number.isFinite(pointer.canvasY) ? Math.round(canvasRect.top + pointer.canvasY) : pointer.sourceEvent?.clientY);
         if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return;
-        const button = document.elementFromPoint(clientX, clientY)?.closest("[data-conn-seg]");
-        if (!button || button.dataset.connNodeId !== String(node.id)) return;
+        const button = connButtonAt(clientX, clientY, node.id);
+        if (!button) return;
         const ok = connectDrop(node, Number(button.dataset.connSeg), button.dataset.connKind, link, button);
-        // The button owns this drop: cancel the native auto-connect / menu.
+        // The button owns this drop whether it connected or flashed: cancel the
+        // native auto-connect / menu (it would target an arbitrary same-type socket)
         customEvent.preventDefault?.();
         if (ok) linkConnector.reset?.(true);
     });
