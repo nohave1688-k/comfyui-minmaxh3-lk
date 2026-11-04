@@ -46,7 +46,7 @@ def library_entries(names, find_path, read_meta):
 
 
 def register_routes(server, names, find_path, read_meta):
-    @server.routes.get("/longvideo/refmods/library")
+    @server.routes.get("/lk/refmods/library")
     async def library(request):
         return web.json_response(library_entries(names, find_path, read_meta))
 

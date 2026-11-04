@@ -3,11 +3,11 @@ import { api } from "/scripts/api.js";
 
 const OPTIMIZER_DONE_SOUND_URL = new URL("../audio/done.mp3", import.meta.url).href;
 
-const NODE = "LongvideoH3Studio";
+const NODE = "LKH3Studio";
 const RH_NODE_IDS = [
     NODE,
 ];
-const OPTIMIZER_ROUTE = "/longvideo/minimax-h3/prompt-optimizer";
+const OPTIMIZER_ROUTE = "/lk/minimax-h3/prompt-optimizer";
 const WIDTH = 500;
 const PANEL_WIDTH = 476;
 const INITIAL_NODE_HEIGHT = Math.round(WIDTH * 2 * 0.9);
@@ -23,14 +23,14 @@ const videoSlots = Array.from({ length: 3 }, (_, i) => `ref_video_${i + 1}`);
 const audioSlots = ["hybrid_audio", ...Array.from({ length: 3 }, (_, i) => `ref_audio_${i + 1}`)];
 const mediaSlots = [...imageSlots, ...videoSlots, ...audioSlots];
 const REFMOD_SLOTS = 8;
-const REFMOD_LIBRARY_ROUTE = "/longvideo/refmods/library";
+const REFMOD_LIBRARY_ROUTE = "/lk/refmods/library";
 const MAX_SEGMENTS = 8;
 const MAX_SEG_IMAGES = 6;
 const MAX_SEG_VIDEOS = 2;
 const MAX_SEG_AUDIOS = 3;
 const MAX_SEG_MODS = 8;
 const MAX_SEG_LORAS = 4;
-const SEGMENT_LORA_ROUTE = "/longvideo/minimax_h3/loras";
+const SEGMENT_LORA_ROUTE = "/lk/minimax_h3/loras";
 /* ===== Per-segment connectable media sockets (drag links onto panel buttons) ===== */
 const CONN_MEDIA_KINDS = {
     first_frame: { max: 1, types: ["IMAGE"] },
@@ -4796,18 +4796,18 @@ function updateRefModChoices(node, entries) {
     node.setDirtyCanvas?.(true, true);
 }
 
-const LONGVIDEO_TITLES = {
-    LongvideoH3Studio: "MiniMaxH3长视频操作台（longvideo)",
-    LongvideoH3LongVideo: "MiniMax-H3 长视频分段采样（longvideo）",
+const LK_TITLES = {
+    LKH3Studio: "MiniMaxH3长视频操作台（LK)",
+    LKH3LongVideo: "MiniMax-H3 长视频分段采样（LK）",
 };
 app.registerExtension({
     name: "longvideo.titles",
     beforeRegisterNodeDef(nodeType, nodeData) {
-        if (!LONGVIDEO_TITLES[nodeData.name]) return;
+        if (!LK_TITLES[nodeData.name]) return;
         const previous = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function(...args) {
             const result = previous?.apply(this, args);
-            this.title = LONGVIDEO_TITLES[nodeData.name];
+            this.title = LK_TITLES[nodeData.name];
             this.setDirtyCanvas?.(true, true);
             return result;
         };

@@ -33,7 +33,7 @@ from .long_video import (
 )
 
 
-NODE_CATEGORY = "LongVideo/MiniMax H3 Integration"
+NODE_CATEGORY = "LK/MiniMax H3 Integration"
 MAX_RESOLUTION = 16384
 ASPECTS = {
     "adaptive": None,
@@ -506,8 +506,8 @@ class MiniMaxH3IntegrationGH(io.ComfyNode):
         # "MiniMax" socket; the merged RefMod list is exposed separately so
         # it can also drive Apply/TextEncode/Save nodes.
         return io.Schema(
-            node_id="LongvideoH3Studio",
-            display_name="MiniMaxH3长视频操作台（longvideo)",
+            node_id="LKH3Studio",
+            display_name="MiniMaxH3长视频操作台（LK)",
             category=NODE_CATEGORY,
             description="Integrated MiniMax H3 conditioning input. The diffusion model remains external.",
             inputs=schema_inputs,

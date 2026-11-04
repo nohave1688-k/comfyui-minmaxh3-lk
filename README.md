@@ -1,4 +1,4 @@
-# ComfyUI MiniMax H3 Long Video
+# ComfyUI MiniMax H3 LK (Long Video)
 
 > MiniMax H3 长视频工作流插件 —— ComfyUI-MiniMaxH3-lanxi 的瘦身重建版。
 >
@@ -6,7 +6,7 @@
 
 ## 节点
 
-### LongvideoH3Studio —— MiniMaxH3长视频操作台（longvideo）
+### LKH3Studio —— MiniMaxH3长视频操作台（LK）
 
 条件化构建器 + 分段面板：
 
@@ -19,7 +19,7 @@
 
 输出 `segments` 分段计划，接长视频分段采样。
 
-### LongvideoH3LongVideo —— MiniMax-H3 长视频分段采样（longvideo）
+### LKH3LongVideo —— MiniMax-H3 长视频分段采样（LK）
 
 分段采样执行器：逐段 LoRA 挂载 → 双时钟采样（视频/音频独立调度）→ 段间 latent 续接
 （上一段尾部 7 个 latent token / 22 帧无缝衔接）→ 音视频联合解码 → 拼接。
@@ -31,15 +31,15 @@
 |---|---|---|
 | 节点 | 7 个已注册 + 16 个未注册 RefMod | **2 个**（纯长视频核心） |
 | 注册方式 | V1 双轨 + comfy_entrypoint | 纯 `NODE_CLASS_MAPPINGS`（V3 类原生执行） |
-| 节点 ID | `LanxiH3Studio` 等 | `LongvideoH3Studio` 等（可共存） |
+| 节点 ID | `LanxiH3Studio` 等 | `LKH3Studio` 等（可共存） |
 | RefMod 库 | `models/refmods/` | 同一路径，**两包共享** |
-| API 路由 | `/lanxi/...` | `/longvideo/...` |
+| API 路由 | `/lanxi/...` | `/lk/...` |
 
 移除内容：单模式管线（适配器 + 独立双时钟采样 + AV 解码三件套，上游已断链）、
 二采分块采样器、Latent 上采样器、16 个未注册的 RefMod 图节点（RefMod 库功能保留在面板底层）。
 
 **注意**：两包可同时安装共存（节点 ID 不同），但请勿同时把两家的面板用于同一个
-工作流节点；迁移旧工作流时，把 `LanxiH3Studio` 换成本包的 `LongvideoH3Studio` 并重新接线。
+工作流节点；迁移旧工作流时，把 `LanxiH3Studio` 换成本包的 `LKH3Studio` 并重新接线。
 
 ## 安装
 
@@ -58,4 +58,4 @@ locales/       中英文翻译
 
 - 分段数据契约：`_normalize_segment`（gh/long_video.py）与前端 `normalizeSegment` 需同步
 - 连线媒体：插座名 `conn_segN_kind.N`（N 为 0 起始序号），收集逻辑在 `gh/nodes.py::_collect_connected_media`
-- API 路由前缀 `/longvideo/...`（loras / prompt-optimizer / refmods/library）
+- API 路由前缀 `/lk/...`（loras / prompt-optimizer / refmods/library）

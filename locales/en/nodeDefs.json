@@ -1,6 +1,6 @@
 {
-  "LongvideoH3Studio": {
-    "display_name": "MiniMaxH3长视频操作台（longvideo)",
+  "LKH3Studio": {
+    "display_name": "MiniMaxH3长视频操作台（LK)",
     "inputs": {
       "clip_name": {
         "name": "CLIP model"
@@ -55,8 +55,8 @@
       }
     }
   },
-  "LongvideoH3LongVideo": {
-    "display_name": "MiniMax-H3 长视频分段采样（longvideo）",
+  "LKH3LongVideo": {
+    "display_name": "MiniMax-H3 长视频分段采样（LK）",
     "inputs": {
       "model": {
         "name": "model"

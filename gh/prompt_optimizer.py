@@ -1846,14 +1846,14 @@ def register_prompt_optimizer_routes() -> bool:
     if instance is None:
         return False
     routes = instance.routes
-    routes.get("/longvideo/minimax-h3/prompt-optimizer/config")(get_prompt_optimizer_config)
-    routes.get("/longvideo/minimax-h3/prompt-optimizer/models")(list_prompt_optimizer_models)
-    routes.get("/longvideo/minimax-h3/prompt-optimizer/runninghub-models")(refresh_runninghub_models)
-    routes.post("/longvideo/minimax-h3/prompt-optimizer/config")(save_prompt_optimizer_config)
-    routes.post("/longvideo/minimax-h3/prompt-optimizer/optimize")(optimize_prompt)
-    routes.post("/longvideo/minimax-h3/prompt-optimizer/start")(start_prompt_optimization)
-    routes.get("/longvideo/minimax-h3/prompt-optimizer/status")(prompt_optimization_status)
-    routes.post("/longvideo/minimax-h3/prompt-optimizer/cancel")(cancel_prompt_optimization)
+    routes.get("/lk/minimax-h3/prompt-optimizer/config")(get_prompt_optimizer_config)
+    routes.get("/lk/minimax-h3/prompt-optimizer/models")(list_prompt_optimizer_models)
+    routes.get("/lk/minimax-h3/prompt-optimizer/runninghub-models")(refresh_runninghub_models)
+    routes.post("/lk/minimax-h3/prompt-optimizer/config")(save_prompt_optimizer_config)
+    routes.post("/lk/minimax-h3/prompt-optimizer/optimize")(optimize_prompt)
+    routes.post("/lk/minimax-h3/prompt-optimizer/start")(start_prompt_optimization)
+    routes.get("/lk/minimax-h3/prompt-optimizer/status")(prompt_optimization_status)
+    routes.post("/lk/minimax-h3/prompt-optimizer/cancel")(cancel_prompt_optimization)
     _ROUTES_REGISTERED = True
     return True
 

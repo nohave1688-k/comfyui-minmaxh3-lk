@@ -54,7 +54,7 @@ DEFAULT_OVERLAP = 20
 CARRY_TOKENS = 7
 CARRY_FRAMES = 22
 CARRY_AUDIO_STEPS = 36
-SEGMENT_TYPE = "LONGVIDEO_H3_SEGMENTS"
+SEGMENT_TYPE = "LK_H3_SEGMENTS"
 
 
 def _clamp_int(value, default, low, high):
@@ -734,9 +734,9 @@ class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="LongvideoH3LongVideo",
-            display_name="MiniMax-H3 长视频分段采样（longvideo）",
-            category="LongVideo/MiniMax H3 Integration",
+            node_id="LKH3LongVideo",
+            display_name="MiniMax-H3 长视频分段采样（LK）",
+            category="LK/MiniMax H3 Integration",
             description=(
                 "Runs the integrated node's 1-8 segment plan: per-segment LoRA, "
                 "previous-tail continuation, dual-clock sampling, decode and concatenation."

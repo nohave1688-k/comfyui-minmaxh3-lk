@@ -3,11 +3,11 @@
 Slimmed-down rebuild of ComfyUI-MiniMaxH3-lanxi (the GH integration + RefMod
 merge) that keeps only the long-video core:
 
-* ``LongvideoH3Studio`` — the segment panel / conditioning builder (1-8
+* ``LKH3Studio`` — the segment panel / conditioning builder (1-8
   segments, per-segment prompts, first/last frames, picture/video/audio
   references, RefMod rows, per-segment LoRA slots, and connectable media
   sockets: drag upstream links onto the panel buttons).
-* ``LongvideoH3LongVideo`` — the segmented sampler: per-segment LoRA, latent
+* ``LKH3LongVideo`` — the segmented sampler: per-segment LoRA, latent
   continuation across seams, dual-clock sampling, joint AV decode.
 
 Removed from the lanxi pack during the rebuild: the single-mode pipeline
@@ -29,13 +29,13 @@ from .gh import long_video as _gh_long_video
 from .gh import prompt_optimizer as _gh_prompt_optimizer  # noqa: F401  (registers prompt-optimizer routes)
 
 NODE_CLASS_MAPPINGS = {
-    "LongvideoH3Studio": _gh_nodes.MiniMaxH3IntegrationGH,
-    "LongvideoH3LongVideo": _gh_long_video.MiniMaxH3LongVideoRunnerGH,
+    "LKH3Studio": _gh_nodes.MiniMaxH3IntegrationGH,
+    "LKH3LongVideo": _gh_long_video.MiniMaxH3LongVideoRunnerGH,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "LongvideoH3Studio": "MiniMaxH3长视频操作台（longvideo)",
-    "LongvideoH3LongVideo": "MiniMax-H3 长视频分段采样（longvideo）",
+    "LKH3Studio": "MiniMaxH3长视频操作台（LK)",
+    "LKH3LongVideo": "MiniMax-H3 长视频分段采样（LK）",
 }
 
 # LoRA list for the per-segment LoRA slots.  ``folder_paths`` is resolved at
@@ -50,7 +50,7 @@ def _register_loras_route() -> None:
         if instance is None:
             return
 
-        @instance.routes.get("/longvideo/minimax_h3/loras")
+        @instance.routes.get("/lk/minimax_h3/loras")
         async def _list_loras(_request):
             try:
                 names = list(folder_paths.get_filename_list("loras"))
