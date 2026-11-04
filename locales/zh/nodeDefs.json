@@ -96,6 +96,22 @@
       },
       "context_noise": {
         "name": "Context noise"
+      },
+      "refine_latent": {
+        "name": "二跑潜空间",
+        "tooltip": "接放大后的 AV 潜空间（本节点 av_latent → AV潜空间放大 → 此口）。连接后本节点以截断调度对放大潜空间做低噪二跑（高清化），而不是重新生成。一跑必须跑满全部分段范围。"
+      },
+      "refine_denoise": {
+        "name": "二跑去噪强度",
+        "tooltip": "截断调度的起始 sigma（= 去噪强度）。0.3–0.5 可锐化放大后的潜空间；1.0 等于完全重采。一跑忽略。"
+      },
+      "refine_audio": {
+        "name": "二跑音频",
+        "options": {
+          "keep": "保留一跑音频",
+          "regenerate": "重新生成音频"
+        },
+        "tooltip": "二跑音频策略。keep：锁定一跑音频（逐位一致）。regenerate：音频也参与低噪重采。一跑忽略。"
       }
     },
     "outputs": {
@@ -113,6 +129,41 @@
       },
       "4": {
         "name": "分段信息"
+      },
+      "5": {
+        "name": "AV 潜空间",
+        "tooltip": "执行范围的全片打包 AV 潜空间（含 lk_layout 布局元数据）。接 AV潜空间放大 后回灌 refine_latent 做高清二跑。"
+      }
+    }
+  },
+  "LKH3AVUpscale": {
+    "display_name": "MiniMax-H3 AV潜空间放大（LK）",
+    "description": "对打包 AV 潜空间的视频部分做空间插值，音频与布局元数据原样透传。链路：长视频采样 av_latent → 本节点 → 长视频采样 refine_latent。",
+    "inputs": {
+      "av_latent": {
+        "name": "AV 潜空间",
+        "tooltip": "长视频采样节点 av_latent 输出的打包 AV 潜空间。"
+      },
+      "upscale_method": {
+        "name": "插值方法",
+        "options": {
+          "nearest-exact": "最近邻",
+          "bilinear": "双线性",
+          "area": "区域平均",
+          "bicubic": "双三次",
+          "lanczos": "Lanczos"
+        },
+        "tooltip": "应用于视频潜空间（及其 mask）的插值方式。"
+      },
+      "scale_by": {
+        "name": "放大倍数",
+        "tooltip": "空间放大倍数。默认 2.0 把 0.5MP 基础画布带到 H3 训练上限（约 1920×1088）。二跑每段算力约为倍数的平方。"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "AV 潜空间",
+        "tooltip": "放大后的打包 AV 潜空间；接长视频采样节点的 refine_latent。"
       }
     }
   }

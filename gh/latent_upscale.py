@@ -9,6 +9,9 @@ pixel canvas is a multiple of 32 while the latent grid is pixels / 16.
 
 from __future__ import annotations
 
+import logging
+
+import comfy.nested_tensor
 import comfy.utils
 from comfy_api.latest import io
 
@@ -41,8 +44,14 @@ def upscale_av_latent(av_latent: dict, upscale_method: str, scale_by: float) -> 
             video_mask = comfy.utils.common_upscale(
                 video_mask, width, height, upscale_method, "disabled"
             )
-        out["noise_mask"] = type(masks)((video_mask, audio_mask))
-    out["samples"] = type(av_latent["samples"])((upscaled, audio))
+        out["noise_mask"] = comfy.nested_tensor.NestedTensor((video_mask, audio_mask))
+    elif masks is not None:
+        logging.debug(
+            "LKH3AVUpscale dropped a non-nested noise_mask (%s); "
+            "expected the nested AV mask from the long video sampler.",
+            type(masks).__name__,
+        )
+    out["samples"] = comfy.nested_tensor.NestedTensor((upscaled, audio))
     return out
 
 

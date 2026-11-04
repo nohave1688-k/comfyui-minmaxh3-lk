@@ -96,6 +96,22 @@
       },
       "context_noise": {
         "name": "Context noise"
+      },
+      "refine_latent": {
+        "name": "refine latent",
+        "tooltip": "Second-pass AV latent (chain: this node's av_latent -> LKH3AVUpscale -> here). When connected, the node re-samples the upscaled latent with a truncated schedule (HD second pass) instead of generating fresh latents. The first pass must have run the full segment range."
+      },
+      "refine_denoise": {
+        "name": "refine denoise",
+        "tooltip": "Starting sigma of the truncated second-pass schedule (= denoise strength). 0.3-0.5 sharpens upscaled latents; 1.0 regenerates fully. Ignored by the first pass."
+      },
+      "refine_audio": {
+        "name": "refine audio",
+        "options": {
+          "keep": "keep",
+          "regenerate": "regenerate"
+        },
+        "tooltip": "Second-pass audio policy. keep: hold the first-pass audio bit-exact (locked mask). regenerate: re-denoise the audio stream as well. Ignored by the first pass."
       }
     },
     "outputs": {
@@ -113,6 +129,41 @@
       },
       "4": {
         "name": "segment_info"
+      },
+      "5": {
+        "name": "av_latent",
+        "tooltip": "Packed AV latent of the executed range with lk_layout metadata. Feed through LKH3AVUpscale and back into refine_latent for the HD second pass."
+      }
+    }
+  },
+  "LKH3AVUpscale": {
+    "display_name": "MiniMax-H3 AV latent upscale (LK)",
+    "description": "Spatially upscales the video part of the packed AV latent for the HD second pass; audio and layout metadata pass through unchanged. Chain: long video sampler av_latent -> this node -> long video sampler refine_latent.",
+    "inputs": {
+      "av_latent": {
+        "name": "av_latent",
+        "tooltip": "Packed AV latent from the long video sampler's av_latent output."
+      },
+      "upscale_method": {
+        "name": "upscale method",
+        "options": {
+          "nearest-exact": "nearest-exact",
+          "bilinear": "bilinear",
+          "area": "area",
+          "bicubic": "bicubic",
+          "lanczos": "lanczos"
+        },
+        "tooltip": "Interpolation applied to the video latent (and its mask)."
+      },
+      "scale_by": {
+        "name": "scale by",
+        "tooltip": "Spatial scale factor. The default 2.0 takes the 0.5MP base canvas to the H3 trained maximum (~1920x1088). The second pass costs roughly scale^2 more compute per token than the first pass."
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "av_latent",
+        "tooltip": "Upscaled packed AV latent; connect to the long video sampler's refine_latent."
       }
     }
   }

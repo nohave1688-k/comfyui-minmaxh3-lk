@@ -332,60 +332,71 @@ def _as_audio_value(audio):
 
 
 _CONNECTED_MEDIA_KINDS = ("first_frame", "last_frame", "image", "video", "audio")
-_CONNECTED_MEDIA_RE = re.compile(r"conn_seg(\d+)_(first_frame|last_frame|image|video|audio)$")
+_CONNECTED_APPLY_MODES = ("all segments", "per segment (in order)")
 
 
 def _connected_media_inputs():
-    """Per-segment connectable media sockets (V3 Autogrow).
+    """Native connectable media sockets (V3 Autogrow).
 
-    One socket group per segment (first/last frame, images, videos, audios).
-    Sockets stay hidden (min=0) until something is connected; a connected
-    socket OVERRIDES the panel's same-kind upload for that segment (replace,
-    not append).  Declared after every legacy widget so existing workflow
-    widget positions remain unchanged.
+    Five socket groups — first/last frame, images, videos, audios — rendered
+    by ComfyUI as regular input sockets: native drag, snap and serialization.
+    A connected socket OVERRIDES the panel's same-kind upload.  Declared after
+    every legacy widget so existing workflow widget positions remain unchanged.
     """
-    inputs = []
-    for seg in range(1, MAX_SEGMENTS + 1):
-        for kind, factory, count in (
-            ("first_frame", io.Image.Input, 1),
-            ("last_frame", io.Image.Input, 1),
-            ("image", io.Image.Input, MAX_IMAGES),
-            ("video", io.Video.Input, MAX_VIDEOS),
-            ("audio", io.Audio.Input, MAX_AUDIOS),
-        ):
-            slot = f"seg{seg}_{kind}"
-            inputs.append(io.Autogrow.Input(
-                f"conn_{slot}",
-                optional=True,
-                template=io.Autogrow.TemplatePrefix(
-                    input=factory(
-                        slot,
-                        optional=True,
-                        tooltip=f"Segment {seg} connected {kind}; overrides the panel's same-kind upload.",
-                    ),
-                    prefix=f"{slot}_", min=0, max=count),
-                tooltip=f"Segment {seg} connected {kind} media; overrides the panel upload.",
-            ))
+    inputs = [
+        io.Combo.Input(
+            "conn_apply",
+            options=list(_CONNECTED_APPLY_MODES),
+            default="all segments",
+            tooltip=(
+                "How connected media map to segments: 'all segments' applies the "
+                "same references to every segment in range; 'per segment (in "
+                "order)' gives the first/last frame to the range's first/last "
+                "segment and distributes images, videos and audios one segment "
+                "each in order."
+            ),
+        ),
+    ]
+    for group_id, factory, label, count in (
+        ("conn_first_frame", io.Image.Input, "首帧（连线）", 1),
+        ("conn_last_frame", io.Image.Input, "尾帧（连线）", 1),
+        ("conn_image", io.Image.Input, "参考图片（连线）", MAX_IMAGES),
+        ("conn_video", io.Video.Input, "参考视频（连线）", MAX_VIDEOS),
+        ("conn_audio", io.Audio.Input, "参考音频（连线）", MAX_AUDIOS),
+    ):
+        inputs.append(io.Autogrow.Input(
+            group_id,
+            optional=True,
+            template=io.Autogrow.TemplatePrefix(
+                input=factory(
+                    group_id,
+                    optional=True,
+                    display_name=label,
+                    tooltip=f"{label}：连接后覆盖面板上传的同槽位素材。",
+                ),
+                prefix=f"{group_id}_", min=0, max=count),
+            tooltip=f"{label}：连接后覆盖面板上传的同槽位素材。",
+        ))
     return inputs
 
 
 def _collect_connected_media(conn_media):
-    """Flatten the Autogrow socket values into ``{segment_number: {kind: data}}``.
+    """Flatten the Autogrow socket values into one media set.
 
-    Each Autogrow input arrives as a dict keyed by its slot names
-    (``seg1_image_1`` ...).  Values are ordered by slot number; image batches
-    are split into one reference per frame.  The result feeds
-    ``build_multi_plan`` which stores it on the plan for the sampler runner.
+    Each Autogrow input arrives as a dict keyed by its socket names
+    (``conn_image_0`` ...), ordered by ordinal.  Image batches are split into
+    one reference per frame.  The result is distributed across segments by
+    ``build_multi_plan`` according to the ``conn_apply`` mode.
     """
-    connected = {}
+    collected = {"first_frame": None, "last_frame": None, "images": [], "videos": [], "audios": []}
     for key, bundle in (conn_media or {}).items():
-        match = _CONNECTED_MEDIA_RE.match(key)
-        if match is None or not isinstance(bundle, dict):
+        if not isinstance(bundle, dict):
             continue
-        segment_number = int(match.group(1))
-        kind = match.group(2)
+        kind = key[5:] if key.startswith("conn_") else None
+        if kind not in _CONNECTED_MEDIA_KINDS:
+            continue
         values = []
-        for slot in sorted(bundle, key=lambda name: int(name.rsplit("_", 1)[-1])):
+        for slot in sorted(bundle, key=lambda name: int(name.rsplit("_", 1)[-1]) if name.rsplit("_", 1)[-1].isdigit() else 0):
             value = bundle.get(slot)
             if value is None:
                 continue
@@ -396,21 +407,22 @@ def _collect_connected_media(conn_media):
             values.append(value)
         if not values:
             continue
-        entry = connected.setdefault(segment_number, {})
         if kind in ("first_frame", "last_frame"):
-            entry[kind] = values[0]
+            collected[kind] = values[0]
         elif kind == "image":
-            images = entry.setdefault("images", [])
             for tensor in values:
                 for frame_index in range(int(tensor.shape[0])):
-                    if len(images) >= MAX_IMAGES:
+                    if len(collected["images"]) >= MAX_IMAGES:
                         break
-                    images.append(tensor[frame_index:frame_index + 1])
+                    collected["images"].append(tensor[frame_index:frame_index + 1])
         elif kind == "video":
-            entry["videos"] = values[:MAX_VIDEOS]
+            collected["videos"].extend(values[:MAX_VIDEOS])
         elif kind == "audio":
-            entry["audios"] = values[:MAX_AUDIOS]
-    return connected
+            collected["audios"].extend(values[:MAX_AUDIOS])
+    collected["images"] = collected["images"][:MAX_IMAGES]
+    collected["videos"] = collected["videos"][:MAX_VIDEOS]
+    collected["audios"] = collected["audios"][:MAX_AUDIOS]
+    return collected
 
 
 class MiniMaxH3IntegrationGH(io.ComfyNode):
@@ -527,7 +539,7 @@ class MiniMaxH3IntegrationGH(io.ComfyNode):
                 task_type, audio_mode, audio_denoise_strength,
                 drive_audio_ordinal, strict_prompt_tags, ref_image_size,
                 gh_state_json="", refmods_json="", segments_json="", prompt_override=None,
-                **conn_media):
+                conn_apply="all segments", **conn_media):
         preview, plan_mods, plan = build_multi_plan(
             aspect=aspect, megapixels=megapixels, segments_json=segments_json,
             clip_name=clip_name, video_vae_name=video_vae_name,
@@ -535,5 +547,6 @@ class MiniMaxH3IntegrationGH(io.ComfyNode):
             audio_denoise_strength=audio_denoise_strength,
             strict_prompt_tags=strict_prompt_tags, ref_image_size=ref_image_size,
             connected_media=_collect_connected_media(conn_media),
+            connected_apply=conn_apply,
         )
         return io.NodeOutput(plan)

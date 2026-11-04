@@ -31,72 +31,6 @@ const MAX_SEG_AUDIOS = 3;
 const MAX_SEG_MODS = 8;
 const MAX_SEG_LORAS = 4;
 const SEGMENT_LORA_ROUTE = "/lk/minimax_h3/loras";
-/* ===== Per-segment connectable media sockets (drag links onto panel buttons) ===== */
-const CONN_MEDIA_KINDS = {
-    first_frame: { max: 1, types: ["IMAGE"] },
-    last_frame: { max: 1, types: ["IMAGE"] },
-    image: { max: MAX_SEG_IMAGES, types: ["IMAGE"] },
-    video: { max: MAX_SEG_VIDEOS, types: ["VIDEO"] },
-    audio: { max: MAX_SEG_AUDIOS, types: ["AUDIO"] },
-};
-const CONN_MEDIA_LABELS = { first_frame: "First frame", last_frame: "Last frame", image: "Picture", video: "Video", audio: "Audio" };
-const connSocketNames = (segNumber, kind) => {
-    const autogrowId = `conn_seg${segNumber}_${kind}`;
-    return Array.from({ length: CONN_MEDIA_KINDS[kind].max }, (_, ordinal) => `${autogrowId}.seg${segNumber}_${kind}_${ordinal}`);
-};
-const connConnectedCount = (node, segNumber, kind) =>
-    connSocketNames(segNumber, kind)
-        .filter(name => node.inputs?.some(inp => inp.name === name && inp.link != null)).length;
-function resolveConnTarget(node, segNumber, kind) {
-    const max = CONN_MEDIA_KINDS[kind].max;
-    let occupiedSingle = null;
-    let freeExisting = null;
-    let firstMissing = null;
-    let connectedCount = 0;
-    for (let ordinal = 0; ordinal < max; ordinal++) {
-        const name = `conn_seg${segNumber}_${kind}.seg${segNumber}_${kind}_${ordinal}`;
-        const index = node.inputs?.findIndex((inp) => inp.name === name);
-        if (index < 0) {
-            // not materialized yet (growth runs after each connection, but a
-            // freshly loaded workflow may not have gone through that yet)
-            if (firstMissing === null) firstMissing = { index: -1, name, create: true };
-            continue;
-        }
-        if (node.inputs[index].link == null) {
-            if (!freeExisting) freeExisting = { index, name, create: false };
-        } else {
-            connectedCount++;
-            if (max === 1) occupiedSingle = { index, name };
-        }
-    }
-    console.debug("[LK resolve]", segNumber, kind, JSON.stringify({ free: !!freeExisting, occupied: !!occupiedSingle, missing: !!firstMissing, connectedCount, max }));
-    if (freeExisting) return freeExisting;
-    // Single-slot kinds (first/last frame) replace their existing connection;
-    // list kinds (image/video/audio) grow a new socket until the cap is hit.
-    if (max === 1 && occupiedSingle) return occupiedSingle;
-    if (firstMissing && connectedCount < max) return firstMissing;
-    console.debug("[LK resolve] -> null");
-    return null;
-}
-/* elementFromPoint returns the panel's widget-container DIV (it overlays the
-   buttons), whose subtree contains the button but closest() only walks
-   ancestors — so hit-testing must be geometric against button rects. */
-function connButtonAt(x, y, nodeId) {
-    for (const b of document.querySelectorAll("[data-conn-seg]")) {
-        const r = b.getBoundingClientRect();
-        if (r.width <= 0 || r.height <= 0) continue;
-        if (x < r.left || x > r.right || y < r.top || y > r.bottom) continue;
-        if (nodeId != null && b.dataset.connNodeId !== String(nodeId)) continue;
-        return b;
-    }
-    return null;
-}
-function connDisconnectKind(node, segNumber, kind) {
-    for (const name of connSocketNames(segNumber, kind)) {
-        const index = node.inputs?.findIndex((inp) => inp.name === name);
-        if (index >= 0 && node.inputs[index].link != null) node.disconnectInput(index);
-    }
-}
 const typeOrder = { video: 0, image: 1, audio: 2 };
 const autoOptimizerHandlers = new Set();
 const workflowStateHandlers = new Set();
@@ -530,26 +464,6 @@ function sanitizeHiddenInputs(node) {
         task.value = "auto";
     }
 }
-/* The COMFY_AUTOGROW_V3 materializer creates one visible socket per group on
-   node creation (40 on this panel). The segment buttons are the connection
-   entry points — empty sockets are reclaimed so only connected ones render;
-   the drop bridge re-creates a socket on demand via node.addInput. */
-let connStripPaused = false;
-function stripEmptyConnSockets(node) {
-    if (connStripPaused || !node?.inputs?.length) return 0;
-    let removed = 0;
-    for (let i = node.inputs.length - 1; i >= 0; i--) {
-        const inp = node.inputs[i];
-        if (typeof inp?.name === "string" && inp.name.startsWith("conn_seg") && inp.link == null) {
-            node.inputs.splice(i, 1);
-            removed++;
-        }
-    }
-    if (removed) {
-        try { node.setSize?.([node.size[0], node.computeSize()[1]]); } catch {}
-    }
-    return removed;
-}
 function hideWidget(w) {
     if (!w) return;
     w.hidden = true; w.options = w.options || {}; w.options.hidden = true;
@@ -772,11 +686,6 @@ function createPanel(node) {
       .ghh3-segadd{border:1px dashed #2f5c72;border-radius:4px;background:#0f1c27;color:#08b4ed;font-size:9px;cursor:pointer;padding:2px 5px}
       .ghh3-segadd:hover{border-color:#0aa4d6;background:#142a36}
       .ghh3-segadd:disabled{opacity:.4;cursor:not-allowed}
-      .ghh3-segadd.ghh3-conn{border-style:solid;border-color:#3f8f5f;background:#12281c;color:#7fd8a0}
-      .ghh3-segadd.ghh3-conn:hover{border-color:#63c98c;background:#173227}
-      .ghh3-segadd.ghh3-conn-err{border-style:solid;border-color:#c25b5b;background:#2a1616;color:#e89090}
-      .ghh3-segadd.ghh3-conn-hover{border-style:solid;border-color:#7fd8a0;background:#1a3a2a;color:#a8f0c0;box-shadow:0 0 0 1px #3f8f5f}
-      .ghh3-chip-ghost{opacity:.45}
       .ghh3-seglora{display:grid;grid-template-columns:minmax(0,1fr) 58px 22px;gap:4px;align-items:center;margin-top:3px}
       .ghh3-seglora select,.ghh3-seglora input{min-width:0;height:20px;background:#182633;color:#dbe8f1;border:1px solid #354b5d;border-radius:4px;font-size:9px;box-sizing:border-box;padding:0 3px}
       .ghh3-seglora button{border:0;background:transparent;color:#c6d4de;cursor:pointer;font-size:11px;padding:0}
@@ -1629,37 +1538,8 @@ function nodeColorToCss(value) {
     node.onConnectionsChange = function(...args) {
         const result = oldConnectionsChange?.apply(this, args);
         queueMicrotask(refreshPromptConnection);
-        try {
-            const slotName = String(this.inputs?.[args[1]]?.name || "");
-            if (slotName.startsWith("conn_seg")) queueMicrotask(() => { stripEmptyConnSockets(this); this.__lkFit?.(); render(true); });
-        } catch {}
         return result;
     };
-    /* Segment media buttons double as link-drop targets: a connected socket
-       overrides the panel's same-kind upload for that segment. */
-    function segmentMediaButton(seg, index, kind) {
-        const segNumber = index + 1;
-        const spec = CONN_MEDIA_KINDS[kind];
-        const connected = connConnectedCount(node, segNumber, kind);
-        const baseLabel = t(CONN_MEDIA_LABELS[kind]);
-        const label = connected > 0 ? `⛓ ${baseLabel} ${connected}/${spec.max}` : `＋${baseLabel}`;
-        const button = segmentAddButton(label, false, () => {
-            if (connConnectedCount(node, segNumber, kind) > 0) {
-                connDisconnectKind(node, segNumber, kind);
-                render(true);
-            } else {
-                segmentUpload(seg, kind);
-            }
-        });
-        button.dataset.connSeg = String(segNumber);
-        button.dataset.connKind = kind;
-        button.dataset.connNodeId = String(node.id);
-        if (connected > 0) button.classList.add("ghh3-conn");
-        button.title = connected > 0
-            ? `已连线 ${connected}/${spec.max}：点击断开连线，恢复面板素材`
-            : "点击上传本地文件，或把上游节点的连线拖到本按钮上（连线后覆盖面板素材）";
-        return button;
-    }
     function delayedTooltip(button, getText) {
         let timer = null; let tip = null;
         const clear = () => { clearTimeout(timer); timer = null; tip?.remove(); tip = null; };
@@ -3855,14 +3735,6 @@ function nodeColorToCss(value) {
     }
     function segmentCard(seg, index) {
         const inRange = index + 1 >= segmentRange.start && index + 1 <= segmentRange.end;
-        const connOverride = kind => connConnectedCount(node, index + 1, kind) > 0;
-        const ghostIfOverridden = (chip, kind) => {
-            if (chip && connOverride(kind)) {
-                chip.classList.add("ghh3-chip-ghost");
-                chip.title = "已被连线接管：断开节点上的连线以恢复面板素材";
-            }
-            return chip;
-        };
         const card = make("div"); card.className = "ghh3-segcard";
         if (index === activeSegment) card.classList.add("active");
         if (!inRange) card.classList.add("skipped"); else card.classList.add("in-range");
@@ -3925,29 +3797,29 @@ function nodeColorToCss(value) {
 
         const media = make("div"); media.className = "ghh3-segmedia";
         if (seg.first_frame) {
-            media.appendChild(ghostIfOverridden(segmentChip(
+            media.appendChild(segmentChip(
                 seg, index, t("First frame"),
                 seg.first_frame,
                 () => insertIntoSegmentPrompt(seg, index, segmentTagText(seg, index, "first_frame", 0)),
                 () => { seg.first_frame = ""; syncSegmentsWidget(); persistState(); render(true); },
                 null, true, segmentThumb(seg.first_frame, "image"),
-            ), "first_frame"));
+            ));
         } else {
-            media.appendChild(segmentMediaButton(seg, index, "first_frame"));
+            media.appendChild(segmentAddButton(`＋${t("First frame")}`, false, () => segmentUpload(seg, "first_frame")));
         }
         if (seg.last_frame) {
-            media.appendChild(ghostIfOverridden(segmentChip(
+            media.appendChild(segmentChip(
                 seg, index, t("Last frame"),
                 seg.last_frame,
                 () => insertIntoSegmentPrompt(seg, index, segmentTagText(seg, index, "last_frame", 0)),
                 () => { seg.last_frame = ""; syncSegmentsWidget(); persistState(); render(true); },
                 null, true, segmentThumb(seg.last_frame, "image"),
-            ), "last_frame"));
+            ));
         } else {
-            media.appendChild(segmentMediaButton(seg, index, "last_frame"));
+            media.appendChild(segmentAddButton(`＋${t("Last frame")}`, false, () => segmentUpload(seg, "last_frame")));
         }
         (seg.images || []).forEach((name, imageIndex) => {
-            const chip = ghostIfOverridden(segmentChip(
+            const chip = segmentChip(
                 seg, index, `${t("Picture")} ${segmentKeyframeCount(index) + imageIndex + 1}`, name,
                 () => insertIntoSegmentPrompt(seg, index, segmentTagText(seg, index, "image", imageIndex)),
                 () => {
@@ -3955,11 +3827,12 @@ function nodeColorToCss(value) {
                     syncSegmentsWidget(); persistState(); render(true);
                 },
                 null, true, segmentThumb(name, "image"),
-            ), "image");
+            );
             attachChipReorder(chip, seg.images, imageIndex, "image");
             media.appendChild(chip);
         });
-        media.appendChild(segmentMediaButton(seg, index, "image"));
+        media.appendChild(segmentAddButton(`＋${t("Picture")}`, seg.images.length >= MAX_SEG_IMAGES,
+            () => segmentUpload(seg, "image")));
         (seg.videos || []).forEach((item, videoIndex) => {
             const mute = make("button", {}, item.muted ? "🔇" : "🔊");
             mute.className = "ghh3-segmute"; mute.title = t(item.muted ? "Mute video" : "Unmute video");
@@ -3968,7 +3841,7 @@ function nodeColorToCss(value) {
                 item.muted = !item.muted;
                 syncSegmentsWidget(); persistState(); render(true);
             };
-            const chip = ghostIfOverridden(segmentChip(
+            const chip = segmentChip(
                 seg, index, `${t("Video")} ${segmentModTags(seg) + videoIndex + 1}`, item.name,
                 () => insertIntoSegmentPrompt(seg, index, segmentTagText(seg, index, "video", videoIndex)),
                 () => {
@@ -3976,24 +3849,26 @@ function nodeColorToCss(value) {
                     syncSegmentsWidget(); persistState(); render(true);
                 },
                 mute, true, segmentThumb(item.name, "video"),
-            ), "video");
+            );
             attachChipReorder(chip, seg.videos, videoIndex, "video");
             media.appendChild(chip);
         });
-        media.appendChild(segmentMediaButton(seg, index, "video"));
+        media.appendChild(segmentAddButton(`＋${t("Video")}`, seg.videos.length >= MAX_SEG_VIDEOS,
+            () => segmentUpload(seg, "video")));
         (seg.audios || []).forEach((item, audioIndex) => {
-            const chip = ghostIfOverridden(segmentChip(
+            const chip = segmentChip(
                 seg, index, `${t("Audio")} ${segmentUnmutedVideos(seg) + audioIndex + 1}`, item.name,
                 () => insertIntoSegmentPrompt(seg, index, segmentTagText(seg, index, "audio", audioIndex)),
                 () => {
                     seg.audios.splice(audioIndex, 1);
                     syncSegmentsWidget(); persistState(); render(true);
                 },
-            ), "audio");
+            );
             attachChipReorder(chip, seg.audios, audioIndex, "audio");
             media.appendChild(chip);
         });
-        media.appendChild(segmentMediaButton(seg, index, "audio"));
+        media.appendChild(segmentAddButton(`＋${t("Audio")}`, seg.audios.length >= MAX_SEG_AUDIOS,
+            () => segmentUpload(seg, "audio")));
         card.appendChild(media);
 
         const modRow = make("div"); modRow.className = "ghh3-segmedia";
@@ -4404,15 +4279,12 @@ function nodeColorToCss(value) {
     updateAdvancedVisibility();
     render();
     advanced.open = false;
-    node.__lkFit = fitMultiSegmentNode;
     for (const hook of ["onAdded", "onConfigure", "onGraphConfigured"]) {
         const old = node[hook];
         node[hook] = function(...args) {
             const configuredState = hook === "onConfigure" ? args[0]?.properties?.[stateKey] : null;
             const result = old?.apply(this, args);
             sanitizeHiddenInputs(this);
-            stripEmptyConnSockets(this);
-            setTimeout(() => { stripEmptyConnSockets(this); node.__lkFit?.(); }, 0);
             for (const n of [
                 "main_mode", "prompt", "task_type", ...mediaSlots,
                 "audio_denoise_strength",
@@ -4601,191 +4473,6 @@ function nodeColorToCss(value) {
     return true;
 }
 
-/* ===== Segment-panel link-drop bridge =====
-   Turns the panel's per-segment media buttons into link-drop targets: dropping
-   an upstream link on a button connects it to that segment's hidden autogrow
-   socket (override semantics; the button state mirrors the connection). */
-function connFlashError(button) {
-    if (!button) return;
-    button.classList.add("ghh3-conn-err");
-    setTimeout(() => button.classList.remove("ghh3-conn-err"), 700);
-}
-function connAlreadyLinkedFrom(node, segNumber, kind, sourceNodeId, sourceSlot) {
-    for (const name of connSocketNames(segNumber, kind)) {
-        const inp = node.inputs?.find(i => i.name === name);
-        if (inp?.link == null) continue;
-        const linkObj = app.graph.links[inp.link];
-        if (linkObj && linkObj.origin_id === sourceNodeId && linkObj.origin_slot === sourceSlot) return true;
-    }
-    return false;
-}
-function setupConnDropBridge() {
-    const canvas = app.canvas;
-    const events = canvas?.linkConnector?.events;
-    if (!events || canvas.__lanxiConnDropInstalled) return;
-    canvas.__lanxiConnDropInstalled = true;
-
-    /* Native-like "snap": while a link is being dragged, the compatible
-       segment button under the cursor lights up. A window capture listener
-       keeps working even when the drag uses pointer capture. */
-    let hoveredButton = null;
-    const clearHover = () => {
-        hoveredButton?.classList.remove("ghh3-conn-hover");
-        hoveredButton = null;
-    };
-    window.addEventListener("pointermove", (e) => {
-        const lc = app.canvas?.linkConnector;
-        if (!lc || lc.state?.connectingTo !== "output") { clearHover(); return; }
-        const link = lc.renderLinks?.at(0);
-        const sourceType = String(link?.fromSlot?.type || "").toUpperCase();
-        const srcNode = app.graph.getNodeById(link?.node?.id ?? -1);
-        const button = connButtonAt(e.clientX, e.clientY, srcNode?.id);
-        if (!button) { clearHover(); return; }
-        const spec = CONN_MEDIA_KINDS[button.dataset.connKind];
-        if (!spec || !spec.types.includes(sourceType)) { clearHover(); return; }
-        if (hoveredButton !== button) {
-            clearHover();
-            hoveredButton = button;
-            button.classList.add("ghh3-conn-hover");
-        }
-    }, true);
-    window.addEventListener("pointerup", clearHover, true);
-
-    /* The same drag can reach us twice (the DOM button sees pointerup when it
-       intercepts the release; the canvas dispatches dropped-on-node when the
-       pointer is captured). Dedupe by source link within a short window. */
-    let lastHandled = null;
-    const linkKey = (link) => `${link?.node?.id}:${link?.fromSlotIndex}`;
-    const wasHandled = (link) => lastHandled && lastHandled.key === linkKey(link)
-        && performance.now() - lastHandled.ts < 200;
-    const markHandled = (link) => { lastHandled = { key: linkKey(link), ts: performance.now() }; };
-
-    function connectDrop(node, segNumber, kind, link, button) {
-        const spec = CONN_MEDIA_KINDS[kind];
-        const sourceType = String(link?.fromSlot?.type || "").toUpperCase();
-        if (!spec || !spec.types.includes(sourceType)) {
-            connFlashError(button);
-            return false;
-        }
-        // skip if this exact source is already wired to the segment (native
-        // replace semantics apply per socket; duplicates are not useful)
-        const already = connAlreadyLinkedFrom(node, segNumber, kind, link.node?.id, link.fromSlotIndex);
-        console.debug("[LK connectDrop]", segNumber, kind, "sourceType:", sourceType, "alreadyLinked:", already);
-        if (already) {
-            return true;
-        }
-        const target = resolveConnTarget(node, segNumber, kind);
-        if (!target) {
-            connFlashError(button);
-            return false;
-        }
-        if (target.create) {
-            // addInput fires onConnectionsChange, whose handler strips empty
-            // sockets and would delete the socket before it gets connected.
-            connStripPaused = true;
-            node.addInput(target.name, spec.types[0], { optional: true });
-            connStripPaused = false;
-        }
-        const targetIndex = node.inputs.findIndex((inp) => inp.name === target.name);
-        if (targetIndex >= 0 && !node.inputs[targetIndex].label) {
-            node.inputs[targetIndex].label = `段${segNumber} ${t(CONN_MEDIA_LABELS[kind])}`;
-        }
-        // output-side connect: the input-side variant silently fails on this
-        // frontend build (input shim's onConnectInput swallows the call)
-        const result = link.node.connect(link.fromSlotIndex, node, targetIndex);
-        if (result === null || result === undefined || result === false) {
-            connFlashError(button);
-            return false;
-        }
-        markHandled(link);
-        return true;
-    }
-
-    /* Path A (release lands on the panel DOM): snapshot the source, cancel the
-       native handling, and schedule the connect after litegraph finishes its
-       own pointerup processing — an immediate reset here would destroy the
-       drag state litegraph still needs. */
-    document.addEventListener("pointerup", (e) => {
-        const lc = app.canvas?.linkConnector;
-        if (!lc || lc.state?.connectingTo !== "output") return;
-        const link = lc.renderLinks?.at(0);
-        if (!link || wasHandled(link)) return;
-        // geometric lookup: e.target is the canvas when litegraph captures the
-        // release, so the button must be found by position, not by event target
-        const button = document.elementFromPoint(e.clientX, e.clientY)?.closest("[data-conn-seg]");
-        if (!button) return;
-        const node = app.graph.getNodeById(Number(button.dataset.connNodeId));
-        if (!node || node.type !== NODE) return;
-        const snapshot = {
-            node: link.node,
-            fromSlot: { type: link.fromSlot?.type },
-            fromSlotIndex: link.fromSlotIndex,
-        };
-        markHandled(link);
-        e.preventDefault?.();
-        e.stopPropagation?.();
-        setTimeout(() => {
-            const ok = connectDrop(node, Number(button.dataset.connSeg), button.dataset.connKind, snapshot, button);
-            // we swallowed the pointerup, so litegraph never cleaned up its own
-            // drag state — reset to kill the floating link either way
-            lc.reset?.(true);
-            if (ok) node.setDirtyCanvas?.(true, true);
-        }, 30);
-    }, true);
-
-    /* Path A (DOM intercepted the release): releasing over the panel's text
-       areas and buttons means litegraph never sees the pointerup — the drag
-       state lingers. Snapshot the source, connect, and reset the connector to
-       kill the floating link. */
-    document.addEventListener("pointerup", (e) => {
-        const lc = app.canvas?.linkConnector;
-        if (!lc || lc.state?.connectingTo !== "output") return;
-        const link = lc.renderLinks?.at(0);
-        if (!link || wasHandled(link)) return;
-        const button = document.elementFromPoint(e.clientX, e.clientY)?.closest("[data-conn-seg]");
-        if (!button) return;
-        const node = app.graph.getNodeById(Number(button.dataset.connNodeId));
-        if (!node || node.type !== NODE) return;
-        const snapshot = {
-            node: link.node,
-            fromSlot: { type: link.fromSlot?.type },
-            fromSlotIndex: link.fromSlotIndex,
-        };
-        markHandled(link);
-        e.preventDefault?.();
-        e.stopPropagation?.();
-        setTimeout(() => {
-            const ok = connectDrop(node, Number(button.dataset.connSeg), button.dataset.connKind, snapshot, button);
-            if (ok) lc.reset?.(true);
-        }, 30);
-    }, true);
-
-    /* Path B (canvas captured the release): litegraph dispatches this event. */
-    events.addEventListener("dropped-on-node", (customEvent) => {
-        const detail = customEvent.detail || {};
-        const node = detail.node;
-        const pointer = detail.event;
-        if (!node || node.type !== NODE || !pointer) return;
-        const linkConnector = canvas.linkConnector;
-        if (linkConnector?.state?.connectingTo !== "output") return;
-        const link = linkConnector.renderLinks?.at(0);
-        if (!link || wasHandled(link)) return;
-        // the drop event carries litegraph canvas-pixel coords (canvasX/Y),
-        // not clientX/Y — convert to viewport coords for elementFromPoint
-        const canvasRect = canvas.canvas.getBoundingClientRect();
-        const clientX = pointer.clientX ?? (Number.isFinite(pointer.canvasX) ? Math.round(canvasRect.left + pointer.canvasX) : pointer.sourceEvent?.clientX);
-        const clientY = pointer.clientY ?? (Number.isFinite(pointer.canvasY) ? Math.round(canvasRect.top + pointer.canvasY) : pointer.sourceEvent?.clientY);
-        if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return;
-        const button = connButtonAt(clientX, clientY, node.id);
-        if (!button) return;
-        const ok = connectDrop(node, Number(button.dataset.connSeg), button.dataset.connKind, link, button);
-        // The button owns this drop whether it connected or flashed: cancel the
-        // native auto-connect / menu (it would target an arbitrary same-type socket)
-        customEvent.preventDefault?.();
-        if (ok) linkConnector.reset?.(true);
-    });
-}
-
 app.registerExtension({
     name: "longvideo.minimax_h3_integration",
     rh: {
@@ -4795,7 +4482,6 @@ app.registerExtension({
     async setup() {
         installPromptKeyShield();
         for (const delay of [0, 100, 500, 1200]) setTimeout(() => patchLiteGraphPromptProcessKey(), delay);
-        for (const delay of [0, 200, 800, 2000]) setTimeout(setupConnDropBridge, delay);
         if (typeof app.ensureNodesRegistered !== "function") return;
         await app.ensureNodesRegistered(new Set(RH_NODE_IDS));
     },
@@ -4969,8 +4655,8 @@ function updateRefModChoices(node, entries) {
 }
 
 const LK_TITLES = {
-    LKH3Studio: "MiniMaxH3长视频操作台（LK)",
-    LKH3LongVideo: "MiniMax-H3 长视频分段采样（LK）",
+    LKH3Studio: "MiniMaxH3长视频操作台（lanxi)",
+    LKH3LongVideo: "MiniMax-H3 长视频分段采样（lanxi）",
 };
 app.registerExtension({
     name: "longvideo.titles",
@@ -4986,7 +4672,58 @@ app.registerExtension({
     },
 });
 
-;
+app.registerExtension({
+    name: "lanxi.refmod_library_disabled",
+    beforeRegisterNodeDef(nodeType, nodeData) {
+        return; // RefMod node UI belongs to the standalone RefMod pack, not this pack.
+        if (!["MiniMaxH3RefModsLoader", "MiniMaxH3RefModsAxis"].includes(nodeData.name)) return;
+        const removed = nodeType.prototype.onRemoved;
+        nodeType.prototype.onRemoved = function(...args) {
+            this._refmodRefresh?.abort();
+            this._refmodDialog?.close();
+            return removed?.apply(this, args);
+        };
+        const previous = nodeType.prototype.onNodeCreated;
+        nodeType.prototype.onNodeCreated = function(...args) {
+            const result = previous?.apply(this, args);
+            const refresh = this.addWidget("button", "Refresh RefMods", null, async () => {
+                this._refmodRefresh?.abort();
+                const controller = new AbortController();
+                this._refmodRefresh = controller;
+                refresh.name = "Refreshing RefMods…";
+                this.setDirtyCanvas?.(true, true);
+                try {
+                    const response = await api.fetchApi("/refmods/library", {signal: controller.signal, cache: "no-store"});
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    const entries = await response.json();
+                    if (controller.signal.aborted) return;
+                    updateRefModChoices(this, entries);
+                    refresh.name = "Refresh RefMods";
+                } catch (error) {
+                    if (controller.signal.aborted) return;
+                    refresh.name = "Refresh failed — click to retry";
+                    console.error("RefMod refresh failed:", error);
+                } finally {
+                    if (!controller.signal.aborted) {
+                        this._refmodRefresh = null;
+                        this.setDirtyCanvas?.(true, true);
+                    }
+                }
+            }, {serialize:false});
+            this.addWidget("button", "RefMod library", null, () => {
+                this._refmodDialog?.close();
+                this._refmodDialog = openRefModLibrary(this, async signal => {
+                    const response = await api.fetchApi("/refmods/library", {signal});
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    const entries = await response.json();
+                    if (!signal.aborted) updateRefModChoices(this, entries);
+                    return entries;
+                });
+            }, {serialize:false});
+            return result;
+        };
+    }
+});
 
 const SLOT = /^(?:mod_(?:[ab]_)?|strength_|copies_|value_|components_|visual_strength_|audio_strength_)(\d+)$/;
 const NONE = new Set(["", "None", "(none)"]);
@@ -5136,7 +4873,15 @@ function setupSlots(node) {
     sync();
 }
 
-;
+app.registerExtension({
+    name: "lanxi.additive_slots_disabled",
+    beforeRegisterNodeDef(nodeType, nodeData) {
+        return; // RefMod node UI belongs to the standalone RefMod pack, not this pack.
+        if (["MiniMaxH3RefModsLoader", "MiniMaxH3RefModsAxis"].includes(nodeData.name)) {
+            installRefModSlots(nodeType);
+        }
+    },
+});
 
 function installRefModApply(nodeType) {
     const created = nodeType.prototype.onNodeCreated;
@@ -5164,7 +4909,13 @@ function installRefModApply(nodeType) {
     };
 }
 
-;
+app.registerExtension({
+    name: "lanxi.apply_canvas_disabled",
+    beforeRegisterNodeDef(nodeType, nodeData) {
+        return; // RefMod node UI belongs to the standalone RefMod pack, not this pack.
+        if (nodeData.name === "MiniMaxH3RefModApply") installRefModApply(nodeType);
+    },
+});
 
 const modes = { training: "Compressed Reference", encode: "Full Reference" };
 
@@ -5178,7 +4929,21 @@ function updateLabels(node) {
     if (steps) steps.label = "Refinement Steps";
 }
 
-;
+app.registerExtension({
+    name: "lanxi.creation_labels_disabled",
+    beforeRegisterNodeDef(nodeType, nodeData) {
+        return; // RefMod node UI belongs to the standalone RefMod pack, not this pack.
+        if (!["MiniMaxH3RefModExtract", "MiniMaxH3RefModMasterExtract"].includes(nodeData.name)) return;
+        for (const hook of ["onNodeCreated", "onConfigure"]) {
+            const previous = nodeType.prototype[hook];
+            nodeType.prototype[hook] = function(...args) {
+                const result = previous?.apply(this, args);
+                updateLabels(this);
+                return result;
+            };
+        }
+    }
+});
 
 
 

@@ -351,17 +351,61 @@ def _connected_source_size(connected):
     return None, None
 
 
+def _distribute_connected(collected, apply_mode, config):
+    """Map the connected media set onto per-segment override slots.
+
+    ``all segments`` copies the full set to every segment in range;
+    ``per segment (in order)`` gives the first/last frame to the range's
+    first/last segment and distributes images, videos and audios one segment
+    each in order.
+    """
+    out = {}
+    if not collected:
+        return out
+    start = int(config["range"]["start"])
+    end = int(config["range"]["end"])
+    if apply_mode == "per segment (in order)":
+        if collected.get("first_frame") is not None:
+            out.setdefault(start, {})["first_frame"] = collected["first_frame"]
+        if collected.get("last_frame") is not None:
+            out.setdefault(end, {})["last_frame"] = collected["last_frame"]
+        for kind in ("images", "videos", "audios"):
+            for offset, value in enumerate(collected.get(kind) or []):
+                seg = start + offset
+                if seg > end:
+                    break
+                out.setdefault(seg, {}).setdefault(kind, []).append(value)
+        return out
+    for seg in range(start, end + 1):
+        entry = {}
+        if collected.get("first_frame") is not None:
+            entry["first_frame"] = collected["first_frame"]
+        if collected.get("last_frame") is not None:
+            entry["last_frame"] = collected["last_frame"]
+        if collected.get("images"):
+            entry["images"] = list(collected["images"])
+        if collected.get("videos"):
+            entry["videos"] = list(collected["videos"])
+        if collected.get("audios"):
+            entry["audios"] = list(collected["audios"])
+        if entry:
+            out[seg] = entry
+    return out
+
+
 def build_multi_plan(*, aspect, megapixels, segments_json, clip_name, video_vae_name,
                      audio_vae_name, audio_mode, audio_denoise_strength,
-                     strict_prompt_tags, ref_image_size, connected_media=None):
+                     strict_prompt_tags, ref_image_size, connected_media=None,
+                     connected_apply="all segments"):
     """Load shared models, compute the global canvas and build the start preview."""
-    connected_media = connected_media or {}
+    collected = connected_media or {}
     config = parse_segments(segments_json)
     clip = comfy_nodes.CLIPLoader().load_clip(clip_name, "minimax")[0]
     video_vae = comfy_nodes.VAELoader().load_vae(video_vae_name)[0]
     audio_vae = comfy_nodes.VAELoader().load_vae(audio_vae_name)[0]
 
-    connected_first = connected_media.get(1) or {}
+    connected_by_segment = _distribute_connected(collected, connected_apply, config)
+    connected_first = connected_by_segment.get(int(config["range"]["start"])) or {}
     source_width, source_height = _connected_source_size(connected_first)
     if source_width is None:
         source_width, source_height = _segment_source_size(config["segments"][0])
@@ -385,12 +429,12 @@ def build_multi_plan(*, aspect, megapixels, segments_json, clip_name, video_vae_
         "clip": clip,
         "video_vae": video_vae,
         "audio_vae": audio_vae,
-        "connected_media": connected_media,
+        "connected_by_segment": connected_by_segment,
         "preview": None,
     }
     start_index = config["range"]["start"] - 1
     preview = build_segment_bundle(plan, start_index, clip=clip,
-                                   connected=connected_media.get(start_index + 1))
+                                   connected=connected_by_segment.get(start_index + 1))
     plan["preview"] = {"index": start_index, "bundle": preview}
     return preview, preview["refmods"], plan
 
@@ -659,14 +703,26 @@ def _resolve_refine_layout(refine_latent, plan):
     normalized = []
     for position, (entry, (_frame_count, video_t, audio_t)) in enumerate(zip(raw_entries, shapes)):
         segment = position + 1
-        tokens = int(entry.get("video_tokens", video_t))
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"Segment {segment}: lk_layout entry must be an object with "
+                "video_tokens/audio_steps, got "
+                f"{type(entry).__name__}. The layout metadata was modified by hand."
+            )
+        try:
+            tokens = int(entry.get("video_tokens", video_t))
+            audio_steps = int(entry.get("audio_steps", audio_t))
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"Segment {segment}: lk_layout video_tokens/audio_steps must be integers, "
+                f"got {entry.get('video_tokens')!r} / {entry.get('audio_steps')!r}."
+            ) from None
         if tokens not in (video_t, video_t - CARRY_TOKENS):
             raise ValueError(
                 f"Segment {segment}: latent length {tokens} tokens does not match the plan "
                 f"(expected {video_t} or {video_t - CARRY_TOKENS}). Segment durations changed "
                 "after the latent was produced; re-run the first pass to refresh it."
             )
-        audio_steps = int(entry.get("audio_steps", audio_t))
         if audio_steps not in (audio_t, audio_t - CARRY_AUDIO_STEPS):
             raise ValueError(
                 f"Segment {segment}: latent audio length {audio_steps} steps does not match the "
@@ -937,9 +993,16 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
     audio_mode = None
     refine_layout = None
     refine_video = refine_audio_latent = None
+    # Decode cleanup (gh/audio_ops.clean_generated_audio_start) keys off this
+    # mode, so the second pass must decode with the mode recorded on the latent
+    # itself - not the panel's current setting - to keep kept audio bit-exact.
+    refine_audio_mode = None
     if refine_mode:
         refine_layout = _resolve_refine_layout(refine_latent, plan)
         refine_video, refine_audio_latent = nested_av_parts(refine_latent)
+        refine_audio_mode = str(
+            refine_latent.get("gh_h3_audio_mode") or plan.get("audio_mode") or "native"
+        )
         total_tokens = sum(entry["video_tokens"] for entry in refine_layout["segments"])
         total_steps = sum(entry["audio_steps"] for entry in refine_layout["segments"])
         if total_tokens != int(refine_video.shape[2]) or total_steps != int(refine_audio_latent.shape[-1]):
@@ -961,7 +1024,7 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
             # latent space below, not as a first-frame conditioning image.
             bundle = build_segment_bundle(
                 plan, index, first_frame_override=None, clip=clip,
-                connected=(plan.get("connected_media") or {}).get(index + 1),
+                connected=(plan.get("connected_by_segment") or {}).get(index + 1),
             )
 
         if release_clip and clip is not None:
@@ -999,7 +1062,7 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
             bundle["av_latent"] = {
                 "samples": comfy.nested_tensor.NestedTensor((video_slice, audio_slice)),
                 "noise_mask": comfy.nested_tensor.NestedTensor((video_mask, audio_mask)),
-                "gh_h3_audio_mode": audio_mode or plan.get("audio_mode") or "native",
+                "gh_h3_audio_mode": refine_audio_mode,
             }
             seg_vmask, seg_amask = video_mask, audio_mask
             absolute_start = entry["frames_before"]
@@ -1041,6 +1104,15 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
 
         if audio_mode is None:
             audio_mode = samples.get("gh_h3_audio_mode") or plan.get("audio_mode") or "native"
+        # All-ones masks carry no information (an absent mask already means
+        # "denoise everywhere" downstream), so drop the trivial ones instead of
+        # storing a redundant full-size mask in the whole-video latent.
+        if (
+            seg_vmask is not None
+            and not bool(torch.any(seg_vmask < 1.0).item())
+            and (seg_amask is None or not bool(torch.any(seg_amask < 1.0).item()))
+        ):
+            seg_vmask = seg_amask = None
         # Keep CPU copies (slicing shares storage; copies release the GPU latent
         # at ``del samples``) for the whole-video latent output.  First-pass
         # copies are already head-trimmed for carried segments, so the packed
