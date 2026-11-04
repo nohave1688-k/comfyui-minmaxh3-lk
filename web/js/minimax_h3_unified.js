@@ -515,6 +515,25 @@ function sanitizeHiddenInputs(node) {
         task.value = "auto";
     }
 }
+/* The COMFY_AUTOGROW_V3 materializer creates one visible socket per group on
+   node creation (40 on this panel). The segment buttons are the connection
+   entry points — empty sockets are reclaimed so only connected ones render;
+   the drop bridge re-creates a socket on demand via node.addInput. */
+function stripEmptyConnSockets(node) {
+    if (!node?.inputs?.length) return 0;
+    let removed = 0;
+    for (let i = node.inputs.length - 1; i >= 0; i--) {
+        const inp = node.inputs[i];
+        if (typeof inp?.name === "string" && inp.name.startsWith("conn_seg") && inp.link == null) {
+            node.inputs.splice(i, 1);
+            removed++;
+        }
+    }
+    if (removed) {
+        try { node.setSize?.([node.size[0], node.computeSize()[1]]); } catch {}
+    }
+    return removed;
+}
 function hideWidget(w) {
     if (!w) return;
     w.hidden = true; w.options = w.options || {}; w.options.hidden = true;
@@ -1595,7 +1614,7 @@ function nodeColorToCss(value) {
         queueMicrotask(refreshPromptConnection);
         try {
             const slotName = String(this.inputs?.[args[1]]?.name || "");
-            if (slotName.startsWith("conn_seg")) queueMicrotask(() => render(true));
+            if (slotName.startsWith("conn_seg")) queueMicrotask(() => { stripEmptyConnSockets(this); render(true); });
         } catch {}
         return result;
     };
@@ -4374,6 +4393,8 @@ function nodeColorToCss(value) {
             const configuredState = hook === "onConfigure" ? args[0]?.properties?.[stateKey] : null;
             const result = old?.apply(this, args);
             sanitizeHiddenInputs(this);
+            stripEmptyConnSockets(this);
+            setTimeout(() => stripEmptyConnSockets(this), 0);
             for (const n of [
                 "main_mode", "prompt", "task_type", ...mediaSlots,
                 "audio_denoise_strength",
@@ -4607,7 +4628,12 @@ function setupConnDropBridge() {
         }
         if (target.create) node.addInput(target.name, spec.types[0], { optional: true });
         const targetIndex = node.inputs.findIndex((inp) => inp.name === target.name);
-        const result = node.connect(targetIndex, link.node, link.fromSlotIndex);
+        if (targetIndex >= 0 && !node.inputs[targetIndex].label) {
+            node.inputs[targetIndex].label = `段${segNumber} ${t(CONN_MEDIA_LABELS[kind])}`;
+        }
+        // output-side connect: the input-side variant silently fails on this
+        // frontend build (input shim's onConnectInput swallows the call)
+        const result = link.node.connect(link.fromSlotIndex, node, targetIndex);
         // The button owns this drop: cancel the native auto-connect / menu.
         customEvent.preventDefault?.();
         if (result === null || result === undefined || result === false) connFlashError(button);
