@@ -55,6 +55,33 @@
       }
     }
   },
+  "LKH3SamplerSettings": {
+    "display_name": "MiniMaxH3 Sampler Settings (LK)",
+    "description": "Sampling recipe for the long video sampler; connect to the sampler's sampler_settings input to override its widget defaults.",
+    "inputs": {
+      "steps": { "name": "steps" },
+      "shift_video": { "name": "video shift" },
+      "shift_audio": { "name": "audio shift" },
+      "sampler_name": { "name": "sampler" },
+      "scheduler": { "name": "scheduler" },
+      "seed": { "name": "seed" },
+      "seed_policy": {
+        "name": "seed policy",
+        "options": {
+          "increment": "increment",
+          "fixed": "fixed"
+        }
+      },
+      "context_noise": { "name": "context noise" },
+      "cfg": { "name": "cfg" }
+    },
+    "outputs": {
+      "0": {
+        "name": "sampler settings",
+        "tooltip": "Connect to the long video sampler's sampler_settings input."
+      }
+    }
+  },
   "LKH3LongVideo": {
     "display_name": "MiniMax-H3 长视频分段采样（LK）",
     "inputs": {

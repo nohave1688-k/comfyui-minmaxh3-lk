@@ -1391,6 +1391,56 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
     return all_frames, all_audio, last_frame, "\n".join(reports), segment_info, av_latent_out
 
 
+class MiniMaxH3SamplerSettingsGH(io.ComfyNode):
+    """Optional sampling-settings node for the long-video sampler.
+
+    Output connects to the sampler's ``sampler_settings`` input and overrides
+    the sampler's own widgets, letting the sampling recipe live as its own
+    reusable node.  Unconnected samplers fall back to their widget values.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LKH3SamplerSettings",
+            display_name="MiniMaxH3采样设置（LK）",
+            category="LK/MiniMax H3 Integration",
+            description="Sampling recipe for the long-video sampler; connect to its sampler_settings input.",
+            inputs=[
+                io.Int.Input("steps", default=4, min=1, max=1000, tooltip="Sampling steps per shot."),
+                io.Float.Input("shift_video", default=12.0, min=0.01, max=100.0, step=0.01),
+                io.Float.Input("shift_audio", default=3.0, min=0.01, max=100.0, step=0.01),
+                io.Combo.Input("sampler_name", options=SAMPLER_OPTIONS, default=DEFAULT_SAMPLER_NAME),
+                io.Combo.Input("scheduler", options=SCHEDULER_OPTIONS, default=DEFAULT_SCHEDULER_NAME),
+                io.Int.Input("seed", default=0, min=0, max=0xFFFFFFFFFFFFFFFF),
+                io.Combo.Input("seed_policy", options=["increment", "fixed"], default="increment"),
+                io.Float.Input("context_noise", default=0.0, min=0.0, max=1.0, step=0.05),
+                io.Float.Input("cfg", default=1.0, min=0.0, max=20.0, step=0.1),
+            ],
+            outputs=[
+                io.Custom("LK_H3_SAMPLER_SETTINGS").Output(
+                    display_name="采样设置",
+                    tooltip="Connect to the long-video sampler's sampler_settings input.",
+                ),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, steps, shift_video, shift_audio, sampler_name, scheduler,
+                seed, seed_policy, context_noise, cfg):
+        return io.NodeOutput({
+            "steps": steps,
+            "shift_video": shift_video,
+            "shift_audio": shift_audio,
+            "sampler_name": sampler_name or DEFAULT_SAMPLER_NAME,
+            "scheduler": scheduler or DEFAULT_SCHEDULER_NAME,
+            "seed": seed,
+            "seed_policy": seed_policy,
+            "context_noise": context_noise,
+            "cfg": cfg,
+        })
+
+
 class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -1427,6 +1477,14 @@ class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):
                     tooltip="Unload the H3 text encoder before each segment's sampling and reload it for the next conditioning. Disable only if VRAM allows keeping CLIP and the DiT together.",
                 ),
                 io.Boolean.Input("free_between_segments", default=True, advanced=True),
+                io.Custom("LK_H3_SAMPLER_SETTINGS").Input(
+                    "sampler_settings", optional=True, display_name="采样设置",
+                    tooltip=(
+                        "Optional MiniMaxH3采样设置 node output. When connected, its "
+                        "values override this node's sampling widgets (steps, shifts, "
+                        "sampler, scheduler, seed, seed policy, context noise, cfg)."
+                    ),
+                ),
                 io.Latent.Input(
                     "refine_latent", optional=True,
                     tooltip=(
@@ -1471,20 +1529,36 @@ class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):
             ],
         )
 
+    _SAMPLER_SETTINGS_KEYS = (
+        "steps", "shift_video", "shift_audio", "sampler_name", "scheduler",
+        "seed", "seed_policy", "context_noise", "cfg",
+    )
+
     @classmethod
     def execute(cls, model, segments, steps, shift_video, shift_audio,
                 sampler_name=DEFAULT_SAMPLER_NAME, scheduler=DEFAULT_SCHEDULER_NAME,
                 seed=0, seed_policy="increment", cfg=1.0, context_noise=0.0,
                 release_clip=True, free_between_segments=True,
+                sampler_settings=None,
                 refine_latent=None, refine_denoise=0.45, refine_audio="keep"):
+        params = {
+            "steps": steps, "shift_video": shift_video, "shift_audio": shift_audio,
+            "sampler_name": sampler_name, "scheduler": scheduler,
+            "seed": seed, "seed_policy": seed_policy, "context_noise": context_noise,
+            "cfg": cfg,
+        }
+        if isinstance(sampler_settings, dict):
+            for key in cls._SAMPLER_SETTINGS_KEYS:
+                if sampler_settings.get(key) is not None:
+                    params[key] = sampler_settings[key]
         return io.NodeOutput(*run_long_video(
             model, segments,
-            steps=steps, shift_video=shift_video, shift_audio=shift_audio,
-            sampler_name=sampler_name or DEFAULT_SAMPLER_NAME,
-            scheduler=scheduler or DEFAULT_SCHEDULER_NAME,
-            seed=seed, seed_policy=seed_policy, cfg=cfg,
+            steps=params["steps"], shift_video=params["shift_video"], shift_audio=params["shift_audio"],
+            sampler_name=params["sampler_name"] or DEFAULT_SAMPLER_NAME,
+            scheduler=params["scheduler"] or DEFAULT_SCHEDULER_NAME,
+            seed=params["seed"], seed_policy=params["seed_policy"], cfg=params["cfg"],
             release_clip=release_clip, free_between_segments=free_between_segments,
-            context_noise=context_noise,
+            context_noise=params["context_noise"],
             refine_latent=refine_latent, refine_denoise=refine_denoise, refine_audio=refine_audio,
         ))
 

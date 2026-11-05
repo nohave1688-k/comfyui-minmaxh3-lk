@@ -37,6 +37,7 @@ NODE_CLASS_MAPPINGS = {
     "LKH3Settings": _gh_nodes.MiniMaxH3SettingsGH,
     "LKH3Shot": _gh_nodes.MiniMaxH3ShotGH,
     "LKH3Shots": _gh_nodes.MiniMaxH3ShotsGH,
+    "LKH3SamplerSettings": _gh_long_video.MiniMaxH3SamplerSettingsGH,
     "LKH3LongVideo": _gh_long_video.MiniMaxH3LongVideoRunnerGH,
     "LKH3AVUpscale": _gh_latent_upscale.MiniMaxH3AVUpscaleGH,
 }
@@ -46,6 +47,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LKH3Settings": "MiniMaxH3模型设置（LK)",
     "LKH3Shot": "MiniMaxH3分镜（LK）",
     "LKH3Shots": "MiniMaxH3分镜合成（LK）",
+    "LKH3SamplerSettings": "MiniMaxH3采样设置（LK）",
     "LKH3LongVideo": "MiniMax-H3 长视频分段采样（LK）",
     "LKH3AVUpscale": "MiniMax-H3 AV潜空间放大（LK）",
 }

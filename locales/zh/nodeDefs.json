@@ -55,6 +55,33 @@
       }
     }
   },
+  "LKH3SamplerSettings": {
+    "display_name": "MiniMaxH3采样设置（LK）",
+    "description": "长视频采样器的采样参数；输出连接到长视频采样节点的 采样设置 输入，覆盖其面板默认值。",
+    "inputs": {
+      "steps": { "name": "步数" },
+      "shift_video": { "name": "视频偏移" },
+      "shift_audio": { "name": "音频偏移" },
+      "sampler_name": { "name": "采样器" },
+      "scheduler": { "name": "调度器" },
+      "seed": { "name": "种子" },
+      "seed_policy": {
+        "name": "种子策略",
+        "options": {
+          "increment": "递增",
+          "fixed": "固定"
+        }
+      },
+      "context_noise": { "name": "上下文噪声" },
+      "cfg": { "name": "CFG" }
+    },
+    "outputs": {
+      "0": {
+        "name": "采样设置",
+        "tooltip": "连接到长视频采样节点的 采样设置 输入。"
+      }
+    }
+  },
   "LKH3LongVideo": {
     "display_name": "MiniMax-H3 长视频分段采样（LK）",
     "inputs": {
