@@ -1329,6 +1329,17 @@ function createPanel(node) {
             node.addCustomWidget(mediaW);
             mediaWidgetByIndex.set(index, mediaW);
             segmentWidgets.push(durationW, promptW, mediaW);
+            // Connector rows: the shot's image/video/audio link points live
+            // inside the block. The matching input slots (conn_image_i etc.)
+            // are bound to these rows, so their sockets render right here.
+            // They stay visible even when the block is collapsed by the run
+            // range: wiring points are permanent, hidden rows would leave
+            // their sockets floating at stale positions.
+            for (const { group, label } of CONN_SLOT_GROUPS) {
+                const row = makeConnRowWidget(group, index, label);
+                node.addCustomWidget(row);
+                segmentWidgets.push(row);
+            }
             seg.loras.forEach((entry, slot) => {
                 const comboW = addPanelWidget("combo", `LoRA ${slot + 1}`, entry.name || "None", value => {
                     if (restoringState) return;
@@ -1363,12 +1374,50 @@ function createPanel(node) {
         { group: "conn_video", type: "VIDEO", label: t("Video") },
         { group: "conn_audio", type: "AUDIO", label: t("Audio") },
     ];
+    // A thin row inside a shot block that hosts that shot's link sockets:
+    // the input slots carry a {name} widget stub pointing at this row, and
+    // the frontend's widget-input-slot layout renders their sockets here.
+    function makeConnRowWidget(group, index, label) {
+        const name = `${group}_row_${index}`;
+        const w = {
+            name,
+            type: "ghh3_connrow",
+            value: "",
+            options: { serialize: false },
+            serialize: false,
+            _ghh3Panel: true,
+        };
+        w.computeSize = () => [0, 22];
+        w.draw = function(ctx, nodeRef, width, y) {
+            const vueLike = Number(y) <= 2;
+            const originX = vueLike ? 0 : 6;
+            const originY = vueLike ? 0 : Number(y) || 0;
+            this.last_y = Number(y) || 0;
+            ctx.save();
+            ctx.translate(originX, originY);
+            ctx.globalAlpha = 0.55;
+            ctx.fillStyle = "#7f93a4";
+            ctx.font = "9px Arial,sans-serif";
+            ctx.textAlign = "left";
+            ctx.textBaseline = "middle";
+            ctx.fillText(`└ ${label}（连线）`, 26, 12);
+            ctx.restore();
+            ctx.globalAlpha = 1;
+        };
+        return w;
+    }
     function syncConnSlots() {
         if (!node.graph || !Array.isArray(node.inputs)) return;
         for (const { group, type, label } of CONN_SLOT_GROUPS) {
             for (let i = 0; i < MAX_SEGMENTS; i += 1) {
                 const name = `${group}_${i}`;
-                if (node.inputs.some(inp => inp.name === name)) continue;
+                const existing = node.inputs.find(inp => inp.name === name);
+                if (existing) {
+                    // Ensure the row binding exists even on inputs restored
+                    // from older workflows.
+                    if (!existing.widget?.name) existing.widget = { name: `${group}_row_${i}` };
+                    continue;
+                }
                 let insertAt = node.inputs.length;
                 for (let j = node.inputs.length - 1; j >= 0; j -= 1) {
                     const inp = node.inputs[j];
@@ -1379,6 +1428,7 @@ function createPanel(node) {
                     label: `${label} ${i + 1}（连线）`,
                     type,
                     optional: true,
+                    widget: { name: `${group}_row_${i}` },
                 });
             }
         }
@@ -1526,8 +1576,12 @@ function createPanel(node) {
             if (hook === "onAdded") {
                 // The node just entered the graph: run one layout pass so the
                 // panel rows get their stacked positions immediately (rAF is
-                // throttled in background tabs, so this runs synchronously).
-                if (this.graph) this.arrange?.();
+                // throttled in background tabs, so this runs synchronously),
+                // and materialize the per-shot connection slots.
+                if (this.graph) {
+                    this.arrange?.();
+                    syncConnSlots();
+                }
                 return result;
             }
             restoringState = true;
