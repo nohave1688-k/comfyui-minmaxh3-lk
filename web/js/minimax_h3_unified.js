@@ -82,7 +82,8 @@ const DOM_TRANSLATIONS = {
     "Latent continuation": "潜空间链接",
     "Latent continuation is ON: the previous segment's last 7 latent tokens are carried into the next segment; no first-frame keyframe and no pixel overlap are used.": "潜空间续接开启：上一段最后 7 个 latent token 带入下一段；不使用首帧关键帧和像素重叠。",
     "Latent continuation is OFF: segments are joined with a hard cut and no seam blending.": "潜空间续接关闭：各段直接硬切，不做接缝融合。",
-    "Add segment": "添加分段",
+    "Shots 1-4": "镜头组 1–4",
+    "Shots 5-8": "镜头组 5–8",
 };
 
 function currentLocale() {
@@ -462,13 +463,16 @@ function createPanel(node) {
         }, 250);
     }
     function ensureSegments() {
-        if (segments.length) return;
-        const segment = defaultSegment(widget(node, "duration_seconds")?.value || 5);
-        segment.prompt = cleanPrompt(widget(node, "prompt")?.value) || "";
-        segments.push(segment);
-        segmentRange = { start: 1, end: 1 };
-        syncSegmentsWidget();
-        persistState();
+        // The eight shot blocks are fixed: pad the loaded state to the full
+        // count so every block always has a backing segment object.
+        while (segments.length < MAX_SEGMENTS) {
+            const segment = defaultSegment(widget(node, "duration_seconds")?.value || 5);
+            if (segments.length === 0) segment.prompt = cleanPrompt(widget(node, "prompt")?.value) || "";
+            segments.push(segment);
+        }
+        segments.length = MAX_SEGMENTS;
+        segmentRange.start = Math.max(1, Math.min(MAX_SEGMENTS, segmentRange.start));
+        segmentRange.end = Math.max(segmentRange.start, Math.min(MAX_SEGMENTS, segmentRange.end));
     }
     const serializedState = () => JSON.stringify({
         segments: segments.map(item => segmentClone(item)),
@@ -697,38 +701,36 @@ function createPanel(node) {
     const globalWidgets = {};
     function clampRangeIndex(value) {
         const parsed = Math.round(Number(value) || 1);
-        return Math.max(1, Math.min(Math.max(1, segments.length), parsed));
+        return Math.max(1, Math.min(MAX_SEGMENTS, parsed));
     }
     function buildGlobalWidgets() {
+        // The eight shot blocks are always present (4+4); the run range is the
+        // switch that decides which blocks are active. Blocks outside the
+        // range collapse to their dimmed header row.
         const countValues = Array.from({ length: MAX_SEGMENTS }, (_, i) => String(i + 1));
-        globalWidgets.count = addPanelWidget("combo", t("Segments"), String(Math.max(1, segments.length)), value => {
-            if (restoringState) return;
-            setSegmentCount(Number(value));
-        }, { values: countValues });
         globalWidgets.rangeStart = addPanelWidget("combo", `${t("Run range")} · ${t("Start")}`, String(segmentRange.start), value => {
             if (restoringState) return;
             segmentRange.start = clampRangeIndex(value);
             if (segmentRange.start > segmentRange.end) segmentRange.end = segmentRange.start;
             syncSegmentState();
-        }, { values: ["1"] });
+            updateSegmentVisibility();
+        }, { values: countValues });
         globalWidgets.rangeEnd = addPanelWidget("combo", `${t("Run range")} · ${t("End")}`, String(segmentRange.end), value => {
             if (restoringState) return;
             segmentRange.end = clampRangeIndex(value);
             if (segmentRange.end < segmentRange.start) segmentRange.start = segmentRange.end;
             syncSegmentState();
-        }, { values: ["1"] });
+            updateSegmentVisibility();
+        }, { values: countValues });
         globalWidgets.latent = addPanelWidget("toggle", t("Latent continuation"), latentContinue, value => {
             if (restoringState) return;
             latentContinue = !!value;
             syncSegmentState();
         });
-        globalWidgets.addSegment = addPanelWidget("button", `＋ ${t("Add segment")}`, null, () => {
-            setSegmentCount(segments.length + 1);
-        });
         refreshRangeOptions();
     }
     function refreshRangeOptions() {
-        const values = Array.from({ length: Math.max(1, segments.length) }, (_, i) => String(i + 1));
+        const values = Array.from({ length: MAX_SEGMENTS }, (_, i) => String(i + 1));
         if (globalWidgets.rangeStart) globalWidgets.rangeStart.options = { ...(globalWidgets.rangeStart.options || {}), values };
         if (globalWidgets.rangeEnd) globalWidgets.rangeEnd.options = { ...(globalWidgets.rangeEnd.options || {}), values };
         if (globalWidgets.rangeStart) globalWidgets.rangeStart.value = String(segmentRange.start);
@@ -745,33 +747,13 @@ function createPanel(node) {
     }
 
     // ── per-segment mutations ────────────────────────────────────────────────
-    function setSegmentCount(next) {
-        const count = Math.max(1, Math.min(MAX_SEGMENTS, Math.round(Number(next) || 1)));
-        while (segments.length < count) segments.push(defaultSegment(5));
-        segments.length = count;
-        segmentRange.start = Math.max(1, Math.min(count, segmentRange.start));
-        segmentRange.end = Math.max(segmentRange.start, Math.min(count, segmentRange.end));
-        activeSegment = Math.max(0, Math.min(count - 1, activeSegment));
-        if (globalWidgets.count) globalWidgets.count.value = String(count);
-        refreshRangeOptions();
-        syncSegmentState();
-        rebuildSegmentWidgets();
-    }
+    // The eight shot blocks are fixed; no add/remove controls exist. Blocks
+    // outside the run range collapse (updateSegmentVisibility) and keep their
+    // data, so extending the range brings them back fully populated.
     function copyPreviousSegment(index) {
         const previous = segments[index - 1];
         if (!previous) return;
         segments[index] = normalizeSegment(segmentClone(previous), index);
-        syncSegmentState();
-        rebuildSegmentWidgets();
-    }
-    function removeSegmentAt(index) {
-        if (segments.length <= 1) return;
-        segments.splice(index, 1);
-        segmentRange.end = Math.max(1, Math.min(segments.length, segmentRange.end));
-        segmentRange.start = Math.max(1, Math.min(segmentRange.end, segmentRange.start));
-        activeSegment = Math.max(0, Math.min(segments.length - 1, activeSegment));
-        if (globalWidgets.count) globalWidgets.count.value = String(segments.length);
-        refreshRangeOptions();
         syncSegmentState();
         rebuildSegmentWidgets();
     }
@@ -1074,17 +1056,16 @@ function createPanel(node) {
             ctx.fillStyle = inRange() ? CHIP_COLORS.badgeRunText : CHIP_COLORS.badgeSkipText;
             ctx.textAlign = "center";
             ctx.fillText(badgeText, titleW + 8 + badgeW / 2, HEADER_H / 2 + 1);
-            // header buttons, right-aligned: [复制上一段] [×]
+            // header buttons, right-aligned: [复制上一段]
             ctx.font = CHIP_FONT;
             const buttons = [];
             if (index > 0) buttons.push({ label: t("Copy previous"), act: "copy" });
-            if (segments.length > 1) buttons.push({ label: "×", act: "remove-segment" });
             let bx = widgetWidth - 8;
             for (let i = buttons.length - 1; i >= 0; i -= 1) {
                 const button = buttons[i];
                 const bw = Math.ceil(ctx.measureText(button.label).width) + 12;
                 bx -= bw;
-                drawTextButton(ctx, bx, 1, bw, HEADER_H - 2, button.label, button.act === "remove-segment" ? CHIP_COLORS.removeBtnText : CHIP_COLORS.btnText);
+                drawTextButton(ctx, bx, 1, bw, HEADER_H - 2, button.label, CHIP_COLORS.btnText);
                 regions.push({ x: bx, y: 1, w: bw, h: HEADER_H - 2, act: button.act });
                 bx -= 4;
             }
@@ -1166,7 +1147,6 @@ function createPanel(node) {
                     break;
                 }
                 case "copy": copyPreviousSegment(index); break;
-                case "remove-segment": removeSegmentAt(index); break;
                 case "add-lora": {
                     if (seg.loras.length < MAX_SEG_LORAS) {
                         seg.loras.push({ name: "", strength_model: 1 });
@@ -1261,30 +1241,94 @@ function createPanel(node) {
             if (at >= 0) node.widgets.splice(at, 1);
         }
         segmentWidgets.length = 0;
+        segmentRowWidgets.clear();
         promptWidgetByIndex.clear();
         promptElByIndex.clear();
         mediaWidgetByIndex.clear();
     }
+    // One canvas-drawn non-interactive label row separating the two 4-shot
+    // groups (the 4+4 arrangement).
+    function makeGroupSeparator(label) {
+        const w = {
+            name: `ghh3_group_${label}`,
+            type: "ghh3_label",
+            value: "",
+            options: { serialize: false },
+            serialize: false,
+            _ghh3Panel: true,
+        };
+        w.computeSize = () => [0, 18];
+        w.draw = function(ctx, nodeRef, width, y) {
+            const vueLike = Number(y) <= 2;
+            const originX = vueLike ? 0 : 6;
+            const originY = vueLike ? 0 : Number(y) || 0;
+            this.last_y = Number(y) || 0;
+            ctx.save();
+            ctx.translate(originX, originY);
+            ctx.globalAlpha = 0.9;
+            ctx.strokeStyle = "#2a4353";
+            ctx.beginPath();
+            ctx.moveTo(0, 15);
+            ctx.lineTo(Math.max(0, (Number(width) || WIDTH) - 8), 15);
+            ctx.stroke();
+            ctx.fillStyle = "#7f93a4";
+            ctx.font = "bold 10px Arial,sans-serif";
+            ctx.textAlign = "left";
+            ctx.textBaseline = "middle";
+            ctx.fillText(label, 0, 8);
+            ctx.restore();
+            ctx.globalAlpha = 1;
+        };
+        return w;
+    }
+
+    // Segments outside the run range collapse to their dimmed chips header:
+    // their editable rows are hidden but the data stays intact, so extending
+    // the range brings the block back exactly as it was left.
+    const segmentRowWidgets = new Map();
+    function applyRowHidden(w, hidden) {
+        if (!w || w.hidden === hidden) return;
+        w.hidden = hidden;
+        w.options = { ...(w.options || {}), hidden };
+    }
+    function segmentInRange(index) {
+        return index + 1 >= segmentRange.start && index + 1 <= segmentRange.end;
+    }
+    function updateSegmentVisibility() {
+        for (const [index, rows] of segmentRowWidgets) {
+            const hidden = !segmentInRange(index);
+            for (const w of rows) applyRowHidden(w, hidden);
+        }
+        if (node.graph) fitNodeHeight();
+    }
+
     function buildSegmentWidgets() {
+        segmentRowWidgets.clear();
         segments.forEach((seg, index) => {
+            if (index === 0 || index === 4) {
+                const separator = makeGroupSeparator(index === 0 ? t("Shots 1-4") : t("Shots 5-8"));
+                node.addCustomWidget(separator);
+                segmentWidgets.push(separator);
+            }
             const labelPrefix = `${t("Segment")} ${index + 1}`;
+            const rows = [];
             const durationW = addPanelWidget("number", `${labelPrefix} · ${t("Duration (seconds)")}`, seg.duration, value => {
                 seg.duration = Math.max(2, Math.min(30, Math.round(Number(value) || 5)));
                 durationW.value = seg.duration;
                 scheduleSegmentSync();
             }, { min: 2, max: 30, step: 1, precision: 0 });
-            segmentWidgets.push(durationW);
+            rows.push(durationW);
             const promptW = addMultilineWidget(`${labelPrefix} · ${t("Prompt")}`, seg.prompt, t("Segment prompt: click a reference chip to insert its tag"), value => {
                 seg.prompt = String(value ?? "");
                 scheduleSegmentSync();
             });
             promptWidgetByIndex.set(index, promptW);
             promptElByIndex.set(index, promptW.element);
-            segmentWidgets.push(promptW);
+            rows.push(promptW);
             const mediaW = makeMediaChipsWidget(seg, index);
             node.addCustomWidget(mediaW);
             mediaWidgetByIndex.set(index, mediaW);
-            segmentWidgets.push(mediaW);
+            segmentWidgets.push(durationW, promptW, mediaW);
             seg.loras.forEach((entry, slot) => {
                 const comboW = addPanelWidget("combo", `LoRA ${slot + 1}`, entry.name || "None", value => {
                     if (restoringState) return;
@@ -1302,10 +1346,66 @@ function createPanel(node) {
                     entry.strength_model = Math.max(-10, Math.min(10, Number(value) || 0));
                     scheduleSegmentSync();
                 }, { min: -10, max: 10, step: 0.05, precision: 2 });
+                rows.push(comboW, strengthW);
                 segmentWidgets.push(comboW, strengthW);
             });
+            segmentRowWidgets.set(index, rows);
         });
+        updateSegmentVisibility();
     }
+    // ── per-segment connection slots (fixed pool of 8 per kind) ──────────────
+    // The backend declares conn_image/conn_video/conn_audio Autogrow groups
+    // with a MAX_SEGMENTS pool, matching the fixed 4+4 shot blocks: one input
+    // slot per shot group, materialized once. In "per segment (in order)"
+    // mode slot N feeds shot N.
+    const CONN_SLOT_GROUPS = [
+        { group: "conn_image", type: "IMAGE", label: t("Picture") },
+        { group: "conn_video", type: "VIDEO", label: t("Video") },
+        { group: "conn_audio", type: "AUDIO", label: t("Audio") },
+    ];
+    function syncConnSlots() {
+        if (!node.graph || !Array.isArray(node.inputs)) return;
+        for (const { group, type, label } of CONN_SLOT_GROUPS) {
+            for (let i = 0; i < MAX_SEGMENTS; i += 1) {
+                const name = `${group}_${i}`;
+                if (node.inputs.some(inp => inp.name === name)) continue;
+                let insertAt = node.inputs.length;
+                for (let j = node.inputs.length - 1; j >= 0; j -= 1) {
+                    const inp = node.inputs[j];
+                    if (typeof inp?.name === "string" && inp.name.startsWith(group + "_")) { insertAt = j + 1; break; }
+                }
+                node.inputs.splice(insertAt, 0, {
+                    name,
+                    label: `${label} ${i + 1}（连线）`,
+                    type,
+                    optional: true,
+                });
+            }
+        }
+        node.setDirtyCanvas?.(true, true);
+    }
+
+    // Fit the node body to its widgets in BOTH directions — grow after an add,
+    // shrink after a removal — so the body never keeps large blank areas.
+    // node.computeSize() ignores the live layout in the current frontend, so
+    // measure the geometry arrange() just computed instead: the bottom edge of
+    // the deepest visible widget row plus a small padding.
+    function fitNodeHeight() {
+        if (!node.graph) return;
+        node.arrange?.();
+        let bottom = 0;
+        for (const w of node.widgets || []) {
+            if (w.hidden) continue;
+            const y = Number.isFinite(w.y) ? w.y : 0;
+            const h = Number(w.computedHeight);
+            bottom = Math.max(bottom, y + (Number.isFinite(h) && h > 0 ? h : 30));
+        }
+        const target = Math.ceil(bottom + 10);
+        if (Number.isFinite(target) && target > 120 && Math.abs((node.size?.[1] ?? 0) - target) > 2) {
+            node.setSize([node.size[0], target]);
+        }
+    }
+
     function rebuildSegmentWidgets() {
         clearSegmentWidgets();
         buildSegmentWidgets();
@@ -1315,13 +1415,8 @@ function createPanel(node) {
         // asserts a graph reference, so skip it while the node is still being
         // constructed (the first draw arranges it once added to the graph).
         if (node.graph) node.arrange?.();
-        node.expandToFitContent?.();
-        // Grow the node to fit the rebuilt rows; never shrink (keeps any
-        // user-resized geometry).
-        const fitted = typeof node.computeSize === "function" ? node.computeSize() : null;
-        if (fitted && Number.isFinite(fitted[1]) && fitted[1] > node.size[1] + 1) {
-            node.setSize([node.size[0], Math.ceil(fitted[1])]);
-        }
+        syncConnSlots();
+        fitNodeHeight();
         node.setDirtyCanvas?.(true, true);
     }
 
@@ -1403,20 +1498,19 @@ function createPanel(node) {
             : (Array.isArray(savedState.segments) ? savedState.segments : null);
         if (restoredSegments?.length) {
             segments = restoredSegments.slice(0, MAX_SEGMENTS).map((raw, idx) => normalizeSegment(raw, idx));
-            if (!segments.length) segments.push(defaultSegment(5));
-        } else {
-            ensureSegments();
         }
+        // Always pad to the fixed block count: the eight shot groups exist
+        // whether or not the saved workflow used them.
+        ensureSegments();
         const restoredRange = restored.range || restored.segmentRange;
         segmentRange = {
-            start: Math.max(1, Math.min(segments.length, Math.round(Number(restoredRange?.start) || 1))),
-            end: Math.max(1, Math.min(segments.length, Math.round(Number(restoredRange?.end) || segments.length))),
+            start: Math.max(1, Math.min(MAX_SEGMENTS, Math.round(Number(restoredRange?.start) || 1))),
+            end: Math.max(1, Math.min(MAX_SEGMENTS, Math.round(Number(restoredRange?.end) || MAX_SEGMENTS))),
         };
         if (segmentRange.start > segmentRange.end) [segmentRange.start, segmentRange.end] = [segmentRange.end, segmentRange.start];
         const restoredLatent = restored.latentContinue !== undefined ? restored.latentContinue : restored.latent_continue;
         latentContinue = restoredLatent !== undefined ? restoredLatent !== false : savedState.latentContinue !== false;
         activeSegment = Math.max(0, Math.min(segments.length - 1, Math.round(Number(restored.activeSegment ?? savedState.activeSegment) || 0)));
-        if (globalWidgets.count) globalWidgets.count.value = String(segments.length);
         if (globalWidgets.latent) globalWidgets.latent.value = latentContinue;
         refreshRangeOptions();
         refreshAdaptiveRatio();

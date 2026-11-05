@@ -24,10 +24,7 @@ from .conditioning import build_conditioning
 from .core import align_frame_count_down
 from ..refmod.nodes import load_visual_mods
 from .long_video import (
-    MAX_AUDIOS,
-    MAX_IMAGES,
     MAX_SEGMENTS,
-    MAX_VIDEOS,
     SEGMENT_TYPE,
     build_multi_plan,
 )
@@ -360,9 +357,11 @@ def _connected_media_inputs():
     for group_id, factory, label, count in (
         ("conn_first_frame", io.Image.Input, "首帧（连线）", 1),
         ("conn_last_frame", io.Image.Input, "尾帧（连线）", 1),
-        ("conn_image", io.Image.Input, "参考图片（连线）", MAX_IMAGES),
-        ("conn_video", io.Video.Input, "参考视频（连线）", MAX_VIDEOS),
-        ("conn_audio", io.Audio.Input, "参考音频（连线）", MAX_AUDIOS),
+        # Per-segment groups follow the segment count: the frontend materializes
+        # one slot per segment, so the pool must cover every possible segment.
+        ("conn_image", io.Image.Input, "参考图片（连线）", MAX_SEGMENTS),
+        ("conn_video", io.Video.Input, "参考视频（连线）", MAX_SEGMENTS),
+        ("conn_audio", io.Audio.Input, "参考音频（连线）", MAX_SEGMENTS),
     ):
         inputs.append(io.Autogrow.Input(
             group_id,
@@ -386,7 +385,9 @@ def _collect_connected_media(conn_media):
     Each Autogrow input arrives as a dict keyed by its socket names
     (``conn_image_0`` ...), ordered by ordinal.  Image batches are split into
     one reference per frame.  The result is distributed across segments by
-    ``build_multi_plan`` according to the ``conn_apply`` mode.
+    ``build_multi_plan`` according to the ``conn_apply`` mode.  The pool holds
+    one reference per segment (MAX_SEGMENTS); per-segment kind limits are
+    enforced downstream when each segment bundle is built.
     """
     collected = {"first_frame": None, "last_frame": None, "images": [], "videos": [], "audios": []}
     for key, bundle in (conn_media or {}).items():
@@ -412,16 +413,16 @@ def _collect_connected_media(conn_media):
         elif kind == "image":
             for tensor in values:
                 for frame_index in range(int(tensor.shape[0])):
-                    if len(collected["images"]) >= MAX_IMAGES:
+                    if len(collected["images"]) >= MAX_SEGMENTS:
                         break
                     collected["images"].append(tensor[frame_index:frame_index + 1])
         elif kind == "video":
-            collected["videos"].extend(values[:MAX_VIDEOS])
+            collected["videos"].extend(values[:MAX_SEGMENTS])
         elif kind == "audio":
-            collected["audios"].extend(values[:MAX_AUDIOS])
-    collected["images"] = collected["images"][:MAX_IMAGES]
-    collected["videos"] = collected["videos"][:MAX_VIDEOS]
-    collected["audios"] = collected["audios"][:MAX_AUDIOS]
+            collected["audios"].extend(values[:MAX_SEGMENTS])
+    collected["images"] = collected["images"][:MAX_SEGMENTS]
+    collected["videos"] = collected["videos"][:MAX_SEGMENTS]
+    collected["audios"] = collected["audios"][:MAX_SEGMENTS]
     return collected
 
 
