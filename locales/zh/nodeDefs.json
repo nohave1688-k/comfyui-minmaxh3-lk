@@ -453,5 +453,78 @@
         "tooltip": "仅音频半边的潜空间。"
       }
     }
+  },
+  "LKH3SegmentGuider": {
+    "display_name": "MiniMax-H3 分段引导（LK）",
+    "description": "一采的 T8 写法：GUIDER 对象内部承担分段循环（逐镜条件+LoRA、潜空间续接），采样器/调度表/种子/cfg 全部来自 SamplerCustomAdvanced 外接的标准原语。",
+    "inputs": {
+      "model": {
+        "name": "模型"
+      },
+      "segments": {
+        "name": "分段计划"
+      },
+      "steps": {
+        "name": "步数",
+        "tooltip": "仅在未连接外部调度表时用于内置调度；外接 SIGMAS 时忽略。"
+      },
+      "shift_video": {
+        "name": "视频偏移"
+      },
+      "shift_audio": {
+        "name": "音频偏移"
+      },
+      "seed": {
+        "name": "种子"
+      },
+      "seed_policy": {
+        "name": "分段种子策略",
+        "tooltip": "increment = 每镜种子+1；fixed = 全部镜头同一种子。"
+      },
+      "context_noise": {
+        "name": "Context noise",
+        "tooltip": "接缝处对续接上下文帧加噪。0 完全保留上一镜尾帧。"
+      },
+      "cfg": {
+        "name": "CFG"
+      },
+      "release_clip": {
+        "name": "分段间释放文本编码器"
+      },
+      "free_between_segments": {
+        "name": "分段间释放缓存"
+      },
+      "video_vae": {
+        "name": "视频 VAE"
+      },
+      "audio_vae": {
+        "name": "音频 VAE"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "GUIDER",
+        "tooltip": "分段引导对象 — 接 SamplerCustomAdvanced 的 guider。采样器/调度表/种子/cfg 全部由外接原语链决定。"
+      },
+      "1": {
+        "name": "conditioning",
+        "tooltip": "首镜的正向条件（预构建，循环内复用）— 供下游二采 BasicGuider 使用。"
+      }
+    }
+  },
+  "LKH3AVTemplate": {
+    "display_name": "MiniMax-H3 空白AV模板（LK）",
+    "description": "按分段计划输出整段空白嵌套 AV 潜空间（零张量 + lk_layout 布局），供契约节点和 SamplerCustomAdvanced 的 latent_image 使用，保持外接采样配方无环。",
+    "inputs": {
+      "segments": {
+        "name": "分段计划"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "AV 潜空间",
+        "tooltip": "整段空白 AV 模板（含 lk_layout 布局）— 接 双钟采样/T8契约 的 av_latent 和 SamplerCustomAdvanced 的 latent_image。"
+      }
+    }
   }
 }

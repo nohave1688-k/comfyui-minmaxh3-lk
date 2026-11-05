@@ -17,6 +17,11 @@ merge) that keeps only the long-video core:
 * ``LKH3DualClockSampler`` — the T8-style sampler contract: patches the model
   with the AV dual-clock / FLOW_AV model sampling and emits MODEL / SAMPLER /
   SIGMAS for comfy-core BasicGuider + SamplerCustomAdvanced chains.
+* ``LKH3SegmentGuider`` — the T8-style GUIDER for the first pass: owns the
+  segmented loop (per-shot conditioning + LoRA, latent continuation) while
+  sampler/sigmas/seed/cfg come from the standard primitives.
+* ``LKH3AVTemplate`` — the whole-range empty nested AV latent (+ lk_layout)
+  that keeps external sampling recipes acyclic.
 * ``LKH3AVDecode`` — decodes the packed AV latent back to frames + audio.
 
 Removed from the lanxi pack during the rebuild: the single-mode pipeline
@@ -49,6 +54,8 @@ NODE_CLASS_MAPPINGS = {
     "LKH3AVUpscale": _gh_latent_upscale.MiniMaxH3AVUpscaleGH,
     "LKH3DualClockSampler": _gh_sampling.MiniMaxH3DualClockSamplerGH,
     "LKH3AVDecode": _gh_audio_ops.MiniMaxH3AVDecodeGH,
+    "LKH3SegmentGuider": _gh_long_video.MiniMaxH3SegmentGuiderGH,
+    "LKH3AVTemplate": _gh_long_video.MiniMaxH3AVTemplateGH,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -61,6 +68,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LKH3AVUpscale": "MiniMax-H3 AV潜空间放大（LK）",
     "LKH3DualClockSampler": "MiniMax-H3 双钟采样（LK）",
     "LKH3AVDecode": "MiniMax-H3 AV解码（LK）",
+    "LKH3SegmentGuider": "MiniMax-H3 分段引导（LK）",
+    "LKH3AVTemplate": "MiniMax-H3 空白AV模板（LK）",
 }
 
 # LoRA list for the per-segment LoRA slots.  ``folder_paths`` is resolved at

@@ -32,7 +32,7 @@ import comfy.nested_tensor
 import comfy.utils
 
 from .conditioning import build_conditioning
-from .core import nested_av_parts
+from .core import empty_av_latent, nested_av_parts
 from .sampling import (
     DEFAULT_SAMPLER_NAME,
     DEFAULT_SCHEDULER_NAME,
@@ -808,14 +808,21 @@ def _assemble_whole_av_latent(collected, audio_mode, latent_continue, start, end
     video = torch.cat([item["video"] for item in collected], dim=2)
     audio = torch.cat([item["audio"] for item in collected], dim=-1)
     entries = []
+    video_offset = 0
+    audio_offset = 0
     for item in collected:
         tokens = int(item["video"].shape[2])
+        audio_steps = int(item["audio"].shape[-1])
         entries.append({
             "segment": item["segment"],
+            "video_offset": video_offset,
             "video_tokens": tokens,
-            "audio_steps": int(item["audio"].shape[-1]),
+            "audio_offset": audio_offset,
+            "audio_steps": audio_steps,
             "frames": _pixel_frames_from_latent_t(tokens),
         })
+        video_offset += tokens
+        audio_offset += audio_steps
     out = {
         "samples": comfy.nested_tensor.NestedTensor((video, audio)),
         "gh_h3_audio_mode": audio_mode or "native",
@@ -851,11 +858,14 @@ def _sample_bundle(model, bundle, *, steps, shift_video, shift_audio,
                    sampler_name, scheduler, seed, cfg, progress=None,
                    external_noise=None, external_sigmas=None, external_sampler=None):
     av_latent = bundle["av_latent"]
-    # An external SAMPLER requires the native FLOW_AV model-sampling patch
-    # (any sampler name other than dual_clock_euler selects it) so standard
-    # samplers advance the audio clock correctly; the external sampler object
-    # then replaces the built-in one.
-    effective_sampler_name = "euler" if external_sampler is not None else sampler_name
+    # An external plain standard sampler requires the native FLOW_AV model
+    # -sampling patch (any sampler name other than dual_clock_euler selects it)
+    # so the sampler advances the audio clock correctly. Our own dual-clock
+    # KSAMPLER (marker attr) pairs with the dual-clock patch instead — the
+    # segmented guider path hands it in as an external sampler.
+    effective_sampler_name = sampler_name
+    if external_sampler is not None and not getattr(external_sampler, "_goohai_dual_clock", False):
+        effective_sampler_name = "euler"
     patched_model, _sampler_builtin, default_sigmas = setup_dual_clock_sampling_gh(
         model, av_latent, steps, shift_video, shift_audio, effective_sampler_name, scheduler
     )
@@ -905,7 +915,7 @@ def _sample_bundle(model, bundle, *, steps, shift_video, shift_audio,
 def run_long_video(model, segments, *, steps, shift_video, shift_audio,
                    sampler_name, scheduler, seed, seed_policy, cfg, release_clip,
                    free_between_segments, context_noise=0.0,
-                   video_vae=None, audio_vae=None,
+                   video_vae=None, audio_vae=None, prebuilt=None,
                    external_noise=None, external_sigmas=None, external_sampler=None):
     plan = segments
     if not isinstance(plan, dict) or not plan.get("segments"):
@@ -922,6 +932,12 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
     latent_continue = bool(plan.get("latent_continue", True))
     lora_cache = _lora_cache()
     clip = plan.get("clip")
+    prebuilt_bundle = None
+    prebuilt_clip = None
+    if prebuilt is not None:
+        prebuilt_bundle, prebuilt_clip = prebuilt
+        if clip is None:
+            clip = prebuilt_clip
     preview = plan.get("preview") or {}
     progress = None
     if getattr(comfy.utils, "PROGRESS_BAR_ENABLED", True):
@@ -935,6 +951,8 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
         segment = plan["segments"][index]
         if preview.get("index") == index and preview.get("bundle") is not None:
             bundle = preview["bundle"]
+        elif index == start and prebuilt_bundle is not None:
+            bundle = prebuilt_bundle
         else:
             if clip is None:
                 clip = _load_clip(plan)
@@ -1074,6 +1092,220 @@ class MiniMaxH3SamplerSettingsGH(io.ComfyNode):
             "context_noise": context_noise,
             "cfg": cfg,
         })
+
+
+def build_empty_plan_latent(plan, start, end):
+    """Whole-range empty AV template with the layout the segmented sampler
+    assembles (per-shot own-token spans, carry heads excluded).
+
+    Feeds contract nodes (双钟采样 / T8 sampler contracts) and
+    SamplerCustomAdvanced's ``latent_image`` without depending on the
+    sampler's own output, so external sampling recipes stay acyclic.
+    """
+    width, height = int(plan["width"]), int(plan["height"])
+    videos = []
+    audios = []
+    entries = []
+    video_offset = 0
+    audio_offset = 0
+    for index in range(start, end + 1):
+        segment = plan["segments"][index]
+        length = int(segment.get("length") or _media().calculate_length(segment["duration"]))
+        latent, _frames = empty_av_latent(width, height, length)
+        video, audio = nested_av_parts(latent)
+        tokens = int(video.shape[2])
+        audio_steps = int(audio.shape[-1])
+        videos.append(video.detach().to("cpu"))
+        audios.append(audio.detach().to("cpu"))
+        entries.append({
+            "segment": index + 1,
+            "video_offset": video_offset,
+            "video_tokens": tokens,
+            "audio_offset": audio_offset,
+            "audio_steps": audio_steps,
+            "frames": _pixel_frames_from_latent_t(tokens),
+        })
+        video_offset += tokens
+        audio_offset += audio_steps
+    video = torch.cat(videos, dim=2)
+    audio = torch.cat(audios, dim=-1)
+    return {
+        "samples": comfy.nested_tensor.NestedTensor((video, audio)),
+        "gh_h3_audio_mode": str(plan.get("audio_mode") or "native"),
+        "lk_layout": {
+            "version": 1,
+            "pass": "template",
+            "latent_continue": bool(plan.get("latent_continue", True)),
+            "range": {"start": start + 1, "end": end + 1},
+            "video_hw": [int(video.shape[3]), int(video.shape[4])],
+            "segments": entries,
+        },
+    }
+
+
+class _SegmentedAVGuider:
+    """GUIDER object for SamplerCustomAdvanced: owns the segmented long-video
+    loop (per-shot conditioning + LoRA, latent continuation, seam noise) while
+    the sampler object, the schedule and the seed come from the surrounding
+    standard sampling primitives — the T8-style decomposition of the first
+    pass.
+
+    ``noise``/``latent_image`` handed in by SamplerCustomAdvanced are the
+    whole-template artifacts of that composition; the loop builds its own
+    per-shot templates and noise. The primitives that matter are the sampler
+    object, the sigmas and the seed.
+    """
+
+    def __init__(self, model_patcher, plan, *, steps, shift_video, shift_audio,
+                 seed, seed_policy, cfg, context_noise, release_clip,
+                 free_between_segments, video_vae, audio_vae, prebuilt):
+        self.model_patcher = model_patcher
+        self._plan = plan
+        self._steps = int(steps)
+        self._shift_video = float(shift_video)
+        self._shift_audio = float(shift_audio)
+        self._seed = int(seed)
+        self._seed_policy = seed_policy
+        self._cfg = float(cfg)
+        self._context_noise = float(context_noise)
+        self._release_clip = bool(release_clip)
+        self._free_between_segments = bool(free_between_segments)
+        self._video_vae = video_vae
+        self._audio_vae = audio_vae
+        self._prebuilt = prebuilt
+
+    def sample(self, noise, latent_image, sampler, sigmas,
+               denoise_mask=None, callback=None, disable_pbar=False, seed=None):
+        av_latent, _first_positive = run_long_video(
+            self.model_patcher, self._plan,
+            steps=self._steps, shift_video=self._shift_video, shift_audio=self._shift_audio,
+            sampler_name=DEFAULT_SAMPLER_NAME, scheduler=DEFAULT_SCHEDULER_NAME,
+            seed=int(self._seed if seed is None else seed),
+            seed_policy=self._seed_policy, cfg=self._cfg,
+            release_clip=self._release_clip, free_between_segments=self._free_between_segments,
+            context_noise=self._context_noise,
+            video_vae=self._video_vae, audio_vae=self._audio_vae,
+            prebuilt=self._prebuilt,
+            external_noise=None, external_sigmas=sigmas, external_sampler=sampler,
+        )
+        return av_latent["samples"]
+
+
+class MiniMaxH3SegmentGuiderGH(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LKH3SegmentGuider",
+            display_name="MiniMax-H3 分段引导（LK）",
+            category="LK/MiniMax H3 Integration",
+            description=(
+                "T8-style GUIDER for the first pass: owns the segmented loop "
+                "(per-shot conditioning + LoRA, latent continuation) while the "
+                "sampler, schedule, seed and cfg come from the standard "
+                "primitives wired into SamplerCustomAdvanced."
+            ),
+            inputs=[
+                io.Model.Input("model"),
+                io.Custom(SEGMENT_TYPE).Input("segments", display_name="segments"),
+                io.Int.Input("steps", default=8, min=1, max=1000,
+                             tooltip="仅在未连接外部调度表时用于内置调度；外接 SIGMAS 时忽略。"),
+                io.Float.Input("shift_video", default=12.0, min=0.01, max=100.0, step=0.01),
+                io.Float.Input("shift_audio", default=3.0, min=0.01, max=100.0, step=0.01),
+                io.Int.Input("seed", default=0, min=0, max=0xFFFFFFFFFFFFFFFF),
+                io.Combo.Input("seed_policy", options=["increment", "fixed"], default="fixed",
+                               tooltip="increment = 每镜种子+1；fixed = 全部镜头同一种子。"),
+                io.Float.Input("context_noise", default=0.0, min=0.0, max=1.0, step=0.05,
+                               tooltip="接缝处对续接上下文帧加噪。0 完全保留上一镜尾帧。"),
+                io.Float.Input("cfg", default=1.0, min=0.0, max=20.0, step=0.1),
+                io.Boolean.Input(
+                    "release_clip", default=True, advanced=True,
+                    tooltip="每镜采样前卸载文本编码器，下镜条件构建时再加载。显存紧张保持开启。",
+                ),
+                io.Boolean.Input("free_between_segments", default=True, advanced=True),
+                io.Vae.Input(
+                    "video_vae", optional=True, display_name="视频 VAE",
+                    tooltip="视频 VAE（从 MiniMaxH3模型设置 节点连线），用于参考图编码。未连接时按模型设置名字加载。",
+                ),
+                io.Vae.Input(
+                    "audio_vae", optional=True, display_name="音频 VAE",
+                    tooltip="音频 VAE（从 MiniMaxH3模型设置 节点连线）。未连接时按模型设置名字加载。",
+                ),
+            ],
+            outputs=[
+                io.Guider.Output(
+                    display_name="GUIDER",
+                    tooltip="分段引导对象 — 接 SamplerCustomAdvanced 的 guider。采样器/调度表/种子/cfg 全部由该原语链决定。",
+                ),
+                io.Conditioning.Output(
+                    "conditioning", display_name="conditioning",
+                    tooltip="首镜的正向条件（预构建，循环内复用）— 供下游二采 BasicGuider 使用。",
+                ),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, model, segments, steps, shift_video, shift_audio, seed,
+                seed_policy, context_noise, cfg,
+                release_clip=True, free_between_segments=True,
+                video_vae=None, audio_vae=None):
+        plan = segments
+        if not isinstance(plan, dict) or not plan.get("segments"):
+            raise ValueError("Connect the storyboard node's 'segments' output to the segment guider.")
+        if video_vae is not None:
+            plan["video_vae"] = video_vae
+        if audio_vae is not None:
+            plan["audio_vae"] = audio_vae
+        start = int(plan["range"]["start"]) - 1
+        # Pre-build the first executed shot's conditioning once: the loop
+        # reuses it (no double work) and it doubles as the conditioning output
+        # for a downstream second-pass BasicGuider.
+        clip = plan.get("clip") or _load_clip(plan)
+        first_bundle = build_segment_bundle(
+            plan, start, first_frame_override=None, clip=clip,
+            connected=(plan.get("connected_by_segment") or {}).get(start + 1),
+        )
+        guider = _SegmentedAVGuider(
+            model, plan,
+            steps=steps, shift_video=shift_video, shift_audio=shift_audio,
+            seed=seed, seed_policy=seed_policy, cfg=cfg, context_noise=context_noise,
+            release_clip=release_clip, free_between_segments=free_between_segments,
+            video_vae=video_vae, audio_vae=audio_vae,
+            prebuilt=(first_bundle, clip),
+        )
+        return io.NodeOutput(guider, first_bundle["positive"])
+
+
+class MiniMaxH3AVTemplateGH(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LKH3AVTemplate",
+            display_name="MiniMax-H3 空白AV模板（LK）",
+            category="LK/MiniMax H3 Integration",
+            description=(
+                "Emits the whole-range empty nested AV latent (zeros + lk_layout) "
+                "matching the segmented sampler's assembly, so contract nodes and "
+                "SamplerCustomAdvanced's latent_image stay acyclic."
+            ),
+            inputs=[
+                io.Custom(SEGMENT_TYPE).Input("segments", display_name="segments"),
+            ],
+            outputs=[
+                io.Latent.Output(
+                    "av_latent", display_name="AV 潜空间",
+                    tooltip="整段空白 AV 模板（含 lk_layout 布局）— 接 双钟采样/T8契约 的 av_latent 和 SamplerCustomAdvanced 的 latent_image。",
+                ),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, segments):
+        plan = segments
+        if not isinstance(plan, dict) or not plan.get("segments"):
+            raise ValueError("Connect the storyboard node's 'segments' output to the AV template node.")
+        start = int(plan["range"]["start"]) - 1
+        end = int(plan["range"]["end"]) - 1
+        return io.NodeOutput(build_empty_plan_latent(plan, start, end))
 
 
 class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):
