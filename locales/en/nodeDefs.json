@@ -59,12 +59,24 @@
     "display_name": "MiniMaxH3 Sampler Settings (LK)",
     "description": "Sampling recipe for the long video sampler; connect to the sampler's sampler_settings input to override its widget defaults.",
     "inputs": {
-      "steps": { "name": "steps" },
-      "shift_video": { "name": "video shift" },
-      "shift_audio": { "name": "audio shift" },
-      "sampler_name": { "name": "sampler" },
-      "scheduler": { "name": "scheduler" },
-      "seed": { "name": "seed" },
+      "steps": {
+        "name": "steps"
+      },
+      "shift_video": {
+        "name": "video shift"
+      },
+      "shift_audio": {
+        "name": "audio shift"
+      },
+      "sampler_name": {
+        "name": "sampler"
+      },
+      "scheduler": {
+        "name": "scheduler"
+      },
+      "seed": {
+        "name": "seed"
+      },
       "seed_policy": {
         "name": "seed policy",
         "options": {
@@ -72,8 +84,12 @@
           "fixed": "fixed"
         }
       },
-      "context_noise": { "name": "context noise" },
-      "cfg": { "name": "cfg" }
+      "context_noise": {
+        "name": "context noise"
+      },
+      "cfg": {
+        "name": "cfg"
+      }
     },
     "outputs": {
       "0": {
@@ -124,24 +140,14 @@
       "context_noise": {
         "name": "Context noise"
       },
-      "refine_latent": {
-        "name": "refine latent",
-        "tooltip": "Second-pass AV latent (chain: this node's av_latent -> LKH3AVUpscale -> here). When connected, the node re-samples the upscaled latent with a truncated schedule (HD second pass) instead of generating fresh latents. The first pass must have run the full segment range."
+      "noise": {
+        "name": "noise"
       },
-      "refine_denoise": {
-        "name": "refine denoise",
-        "tooltip": "Starting sigma of the truncated second-pass schedule (= denoise strength). 0.3-0.5 sharpens upscaled latents; 1.0 regenerates fully. Ignored by the first pass."
+      "sigmas": {
+        "name": "sigmas"
       },
-      "noise": { "name": "noise" },
-      "sigmas": { "name": "sigmas" },
-      "sampler": { "name": "sampler" },
-      "refine_audio": {
-        "name": "refine audio",
-        "options": {
-          "keep": "keep",
-          "regenerate": "regenerate"
-        },
-        "tooltip": "Second-pass audio policy. keep: hold the first-pass audio bit-exact (locked mask). regenerate: re-denoise the audio stream as well. Ignored by the first pass."
+      "sampler": {
+        "name": "sampler"
       }
     },
     "outputs": {
@@ -211,21 +217,51 @@
     "display_name": "MiniMaxH3 Shot (LK)",
     "description": "One long-video shot: duration, prompt, first/last frame and reference media sockets. Output connects to the MiniMaxH3 Shot Merger node.",
     "inputs": {
-      "duration": { "name": "duration (s)" },
-      "prompt": { "name": "prompt" },
-      "first_frame": { "name": "first frame" },
-      "last_frame": { "name": "last frame" },
-      "ref_image_1": { "name": "image 1" },
-      "ref_image_2": { "name": "image 2" },
-      "ref_image_3": { "name": "image 3" },
-      "ref_image_4": { "name": "image 4" },
-      "ref_image_5": { "name": "image 5" },
-      "ref_image_6": { "name": "image 6" },
-      "ref_video_1": { "name": "video 1" },
-      "ref_video_2": { "name": "video 2" },
-      "ref_audio_1": { "name": "audio 1" },
-      "ref_audio_2": { "name": "audio 2" },
-      "ref_audio_3": { "name": "audio 3" }
+      "duration": {
+        "name": "duration (s)"
+      },
+      "prompt": {
+        "name": "prompt"
+      },
+      "first_frame": {
+        "name": "first frame"
+      },
+      "last_frame": {
+        "name": "last frame"
+      },
+      "ref_image_1": {
+        "name": "image 1"
+      },
+      "ref_image_2": {
+        "name": "image 2"
+      },
+      "ref_image_3": {
+        "name": "image 3"
+      },
+      "ref_image_4": {
+        "name": "image 4"
+      },
+      "ref_image_5": {
+        "name": "image 5"
+      },
+      "ref_image_6": {
+        "name": "image 6"
+      },
+      "ref_video_1": {
+        "name": "video 1"
+      },
+      "ref_video_2": {
+        "name": "video 2"
+      },
+      "ref_audio_1": {
+        "name": "audio 1"
+      },
+      "ref_audio_2": {
+        "name": "audio 2"
+      },
+      "ref_audio_3": {
+        "name": "audio 3"
+      }
     },
     "outputs": {
       "0": {
@@ -238,18 +274,42 @@
     "display_name": "MiniMaxH3 Shot Merger (LK)",
     "description": "Collects ordered MiniMaxH3 Shot nodes with the model settings and emits the segment plan for the sampler.",
     "inputs": {
-      "settings": { "name": "settings" },
-      "latent_continue": { "name": "latent continue" },
-      "range_start": { "name": "run range start" },
-      "range_end": { "name": "run range end" },
-      "shot_1": { "name": "shot 1" },
-      "shot_2": { "name": "shot 2" },
-      "shot_3": { "name": "shot 3" },
-      "shot_4": { "name": "shot 4" },
-      "shot_5": { "name": "shot 5" },
-      "shot_6": { "name": "shot 6" },
-      "shot_7": { "name": "shot 7" },
-      "shot_8": { "name": "shot 8" }
+      "settings": {
+        "name": "settings"
+      },
+      "latent_continue": {
+        "name": "latent continue"
+      },
+      "range_start": {
+        "name": "run range start"
+      },
+      "range_end": {
+        "name": "run range end"
+      },
+      "shot_1": {
+        "name": "shot 1"
+      },
+      "shot_2": {
+        "name": "shot 2"
+      },
+      "shot_3": {
+        "name": "shot 3"
+      },
+      "shot_4": {
+        "name": "shot 4"
+      },
+      "shot_5": {
+        "name": "shot 5"
+      },
+      "shot_6": {
+        "name": "shot 6"
+      },
+      "shot_7": {
+        "name": "shot 7"
+      },
+      "shot_8": {
+        "name": "shot 8"
+      }
     },
     "outputs": {
       "0": {

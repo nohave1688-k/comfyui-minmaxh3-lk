@@ -8,7 +8,7 @@ segment's LoRAs, samples with the dual clock, decodes, trims the overlap and
 concatenates the result.  It also emits the whole-video packed AV latent
 (``av_latent``) with ``lk_layout`` metadata.
 
-Connecting an upscaled AV latent (via ``LKH3AVUpscale``) to ``refine_latent``
+Feeding the packed AV latent (via ``LKH3AVUpscale``) into downstream chains
 switches the same loop into the HD second pass: per-segment slices are
 re-sampled from a truncated sigma schedule instead of being generated fresh.
 
@@ -799,150 +799,6 @@ def _collapse_av_mask(av_latent):
     return video_mask, audio_mask
 
 
-def _refine_sigmas(patched_model, scheduler, steps, sigma_start, shift_video):
-    """Truncated dual-clock sigma schedule starting at ``sigma_start``.
-
-    For native_flow the truncation is exact: the shifted schedule is a
-    monotone map of the base linspace, so starting the base linspace at the
-    inverse-shifted ``sigma_start`` reproduces the full schedule's shape below
-    the cut.  Other schedulers keep their native tail and get the exact
-    ``sigma_start`` prepended.
-    """
-    sigma_start = max(1e-4, min(1.0, float(sigma_start)))
-    shift_video = float(shift_video)
-    if scheduler == DEFAULT_SCHEDULER_NAME:
-        base_start = sigma_start / (shift_video - sigma_start * (shift_video - 1.0))
-        base = torch.linspace(base_start, 0.0, int(steps) + 1, dtype=torch.float32)
-        return shift_sigma(base, shift_video)
-    model_sampling = patched_model.get_model_object("model_sampling")
-    full = _scheduler_sigmas(model_sampling, scheduler, int(steps), shift_video).cpu().float()
-    tail = full[full <= sigma_start + 1e-6]
-    if tail.numel() < 2:
-        tail = torch.tensor([sigma_start, 0.0], dtype=torch.float32)
-    elif float(tail[0]) < sigma_start - 1e-6:
-        tail = torch.cat([torch.tensor([sigma_start], dtype=torch.float32), tail])
-    return tail
-
-
-def _fix_regenerate_audio_noise(noise, av_latent, sigma_video, shift_video, shift_audio,
-                                patched_model):
-    """Re-anchor the audio part of the packed noise to the audio clock.
-
-    ``CONST.noise_scaling`` mixes the whole packed latent at the video sigma,
-    but the dual-clock trajectory starts the audio stream at
-    ``time_shift(sigma_video)``.  Pre-distorting the audio noise makes the
-    post-scaling audio part land on its own clock:
-    ``sigma_v * eps' + (1 - sigma_v) * x0 == sigma_a * eps + (1 - sigma_a) * x0``.
-    Only needed when the second pass regenerates audio; a locked audio mask
-    (refine_audio="keep") restores the clean latent every step regardless.
-    """
-    sigma_video = float(sigma_video)
-    if sigma_video >= 1.0 - 1e-6:
-        return noise
-    if not getattr(noise, "is_nested", False):
-        return noise
-    parts = noise.unbind()
-    if len(parts) != 2:
-        return noise
-    noise_video, noise_audio = parts
-    _, clean_audio = nested_av_parts(av_latent)
-    sigma_audio = time_shift_sigma(sigma_video, float(shift_video), float(shift_audio))
-    sampling_obj = patched_model.get_model_object("model_sampling")
-    noise_scale = float(getattr(sampling_obj, "noise_scale", 1.0) or 1.0)
-    corrected = (
-        sigma_audio * noise_audio.float()
-        + (sigma_video - sigma_audio) * clean_audio.float().to(device=noise_audio.device)
-    ) / max(1e-6, sigma_video * noise_scale)
-    return comfy.nested_tensor.NestedTensor((noise_video, corrected.to(noise_audio.dtype)))
-
-
-def _resolve_refine_layout(refine_latent, plan):
-    """Resolve per-segment token layout for slicing the whole-video latent.
-
-    The layout metadata (``lk_layout``) written by the first pass is the source
-    of truth: it records what was actually trimmed at each seam.  Without it
-    (hand-built latents) the current plan's semantics are derived and strongly
-    validated against the packed length by the caller.  Requires full-segment
-    coverage so absolute offsets exist for every segment.
-    """
-    segments_plan = plan["segments"]
-    shapes = []
-    for segment in segments_plan:
-        length = int(segment.get("length") or _media().calculate_length(segment["duration"]))
-        shapes.append(temporal_shape(length))
-    raw = refine_latent.get("lk_layout")
-    raw_entries = raw.get("segments") if isinstance(raw, dict) else None
-    if not isinstance(raw_entries, list) or not raw_entries:
-        latent_continue = bool(plan.get("latent_continue", True))
-        raw_entries = [
-            {
-                "segment": position + 1,
-                "video_tokens": video_t - (CARRY_TOKENS if latent_continue and position > 0 else 0),
-                "audio_steps": audio_t - (CARRY_AUDIO_STEPS if latent_continue and position > 0 else 0),
-            }
-            for position, (_frame_count, video_t, audio_t) in enumerate(shapes)
-        ]
-    if len(raw_entries) != len(shapes):
-        raise ValueError(
-            "The refine latent's layout does not match the connected plan "
-            f"(layout has {len(raw_entries)} segment entries, plan has {len(shapes)}). "
-            "Run the first pass over the full segment range with this plan, then upscale its "
-            "'av_latent' output for the second pass."
-        )
-    normalized = []
-    for position, (entry, (_frame_count, video_t, audio_t)) in enumerate(zip(raw_entries, shapes)):
-        segment = position + 1
-        if not isinstance(entry, dict):
-            raise ValueError(
-                f"Segment {segment}: lk_layout entry must be an object with "
-                "video_tokens/audio_steps, got "
-                f"{type(entry).__name__}. The layout metadata was modified by hand."
-            )
-        try:
-            tokens = int(entry.get("video_tokens", video_t))
-            audio_steps = int(entry.get("audio_steps", audio_t))
-        except (TypeError, ValueError):
-            raise ValueError(
-                f"Segment {segment}: lk_layout video_tokens/audio_steps must be integers, "
-                f"got {entry.get('video_tokens')!r} / {entry.get('audio_steps')!r}."
-            ) from None
-        if tokens not in (video_t, video_t - CARRY_TOKENS):
-            raise ValueError(
-                f"Segment {segment}: latent length {tokens} tokens does not match the plan "
-                f"(expected {video_t} or {video_t - CARRY_TOKENS}). Segment durations changed "
-                "after the latent was produced; re-run the first pass to refresh it."
-            )
-        if audio_steps not in (audio_t, audio_t - CARRY_AUDIO_STEPS):
-            raise ValueError(
-                f"Segment {segment}: latent audio length {audio_steps} steps does not match the "
-                f"plan (expected {audio_t} or {audio_t - CARRY_AUDIO_STEPS}). Re-run the first "
-                "pass to refresh the latent."
-            )
-        normalized.append({
-            "segment": segment,
-            "video_tokens": tokens,
-            "audio_steps": audio_steps,
-            "frames": _pixel_frames_from_latent_t(tokens),
-        })
-    video_offset = 0
-    audio_offset = 0
-    frames_before = 0
-    for entry in normalized:
-        entry["video_offset"] = video_offset
-        entry["audio_offset"] = audio_offset
-        entry["frames_before"] = frames_before
-        video_offset += entry["video_tokens"]
-        audio_offset += entry["audio_steps"]
-        frames_before += entry["frames"]
-    return {
-        "version": 1,
-        "pass": str(raw.get("pass")) if isinstance(raw, dict) and raw.get("pass") else "first",
-        "latent_continue": bool(raw.get("latent_continue")) if isinstance(raw, dict)
-        else bool(plan.get("latent_continue", True)),
-        "segments": normalized,
-    }
-
-
 def _assemble_whole_av_latent(collected, audio_mode, latent_continue, start, end):
     """Concatenate the executed segments into one whole-video AV latent.
 
@@ -992,87 +848,8 @@ def _assemble_whole_av_latent(collected, audio_mode, latent_continue, start, end
     return out
 
 
-def _assemble_refined_latent(refine_latent, layout, collected, start, end):
-    """Splice the refined segment latents back into the untouched ones.
-
-    The result covers every segment again (layout unchanged), so the output can
-    feed further refine rounds or the upscale node without re-deriving offsets.
-    """
-    video, audio = nested_av_parts(refine_latent)
-    ref_vmask, ref_amask = _collapse_av_mask(refine_latent)
-    refined_by_segment = {item["segment"]: item for item in collected}
-    # Collected tensors are CPU copies; bring the untouched input slices onto
-    # the same device so the concatenation cannot fail on GPU-resident latents.
-    target_device = collected[0]["video"].device if collected else video.device
-    video_parts = []
-    audio_parts = []
-    video_masks = []
-    audio_masks = []
-    for entry in layout["segments"]:
-        refined = refined_by_segment.get(entry["segment"])
-        if refined is not None:
-            video_parts.append(refined["video"])
-            audio_parts.append(refined["audio"])
-            video_masks.append(refined["video_mask"])
-            audio_masks.append(refined["audio_mask"])
-            continue
-        v_slice = video[
-            ..., entry["video_offset"]:entry["video_offset"] + entry["video_tokens"], :, :
-        ].detach().to(device=target_device)
-        a_slice = audio[
-            ..., entry["audio_offset"]:entry["audio_offset"] + entry["audio_steps"]
-        ].detach().to(device=target_device)
-        video_parts.append(v_slice)
-        audio_parts.append(a_slice)
-        video_masks.append(
-            None if ref_vmask is None
-            else ref_vmask[..., entry["video_offset"]:entry["video_offset"] + entry["video_tokens"], :, :]
-                .detach().to(device=target_device)
-        )
-        audio_masks.append(
-            None if ref_amask is None
-            else ref_amask[..., entry["audio_offset"]:entry["audio_offset"] + entry["audio_steps"]]
-                .detach().to(device=target_device)
-        )
-    out = {
-        "samples": comfy.nested_tensor.NestedTensor(
-            (torch.cat(video_parts, dim=2), torch.cat(audio_parts, dim=-1))
-        ),
-        "gh_h3_audio_mode": refine_latent.get("gh_h3_audio_mode") or "native",
-        "lk_layout": {
-            "version": 1,
-            "pass": "refine",
-            "latent_continue": bool(layout.get("latent_continue")),
-            "range": {"start": start + 1, "end": end + 1},
-            "refined": [item["segment"] for item in collected],
-            "segments": [dict(entry) for entry in layout["segments"]],
-        },
-    }
-    if any(mask is not None for mask in video_masks) or any(mask is not None for mask in audio_masks):
-        filled_video_masks = []
-        filled_audio_masks = []
-        for entry, vmask, amask in zip(layout["segments"], video_masks, audio_masks):
-            tokens = entry["video_tokens"]
-            steps = entry["audio_steps"]
-            filled_video_masks.append(
-                vmask if vmask is not None
-                else torch.ones((video.shape[0], 1, tokens, video.shape[3], video.shape[4]),
-                                device=target_device, dtype=video.dtype)
-            )
-            filled_audio_masks.append(
-                amask if amask is not None
-                else torch.ones((audio.shape[0], 1, audio.shape[2], steps),
-                                device=target_device, dtype=audio.dtype)
-            )
-        out["noise_mask"] = comfy.nested_tensor.NestedTensor(
-            (torch.cat(filled_video_masks, dim=2), torch.cat(filled_audio_masks, dim=-1))
-        )
-    return out
-
-
 def _sample_bundle(model, bundle, *, steps, shift_video, shift_audio,
                    sampler_name, scheduler, seed, cfg, progress=None,
-                   refine_sigma_start=None, refine_audio_regen=False,
                    external_noise=None, external_sigmas=None, external_sampler=None):
     av_latent = bundle["av_latent"]
     # An external SAMPLER requires the native FLOW_AV model-sampling patch
@@ -1085,11 +862,8 @@ def _sample_bundle(model, bundle, *, steps, shift_video, shift_audio,
     )
     sampler = external_sampler if external_sampler is not None else _sampler_builtin
     if external_sigmas is not None:
-        # User-owned schedule: used as-is for every pass (refine_denoise does
-        # not truncate an external schedule).
+        # User-owned schedule: used as-is for every pass.
         sigmas = external_sigmas
-    elif refine_sigma_start is not None:
-        sigmas = _refine_sigmas(patched_model, scheduler, steps, refine_sigma_start, shift_video)
     else:
         sigmas = default_sigmas
     guider = _make_guider(patched_model, bundle["positive"], cfg)
@@ -1098,10 +872,6 @@ def _sample_bundle(model, bundle, *, steps, shift_video, shift_audio,
         noise = external_noise.generate_noise(samples, int(seed) & 0x7FFFFFFFFFFFFFFF)
     else:
         noise = _make_noise(samples, seed)
-        if refine_audio_regen:
-            noise = _fix_regenerate_audio_noise(
-                noise, av_latent, float(sigmas[0]), shift_video, shift_audio, patched_model
-            )
     disable_pbar = not getattr(comfy.utils, "PROGRESS_BAR_ENABLED", True)
     previewer = None
     try:
@@ -1168,19 +938,14 @@ def torchaudio_resample(waveform, source_rate, target_rate):
 
 
 def run_long_video(model, segments, *, steps, shift_video, shift_audio,
-                   sampler_name, scheduler, seed, seed_policy, cfg,
-                   release_clip, free_between_segments, context_noise=0.0,
-                   external_noise=None, external_sigmas=None, external_sampler=None,
-                   refine_latent=None, refine_denoise=0.45, refine_audio="keep"):
+                   free_between_segments, context_noise=0.0,
+                   external_noise=None, external_sigmas=None, external_sampler=None):
     plan = segments
     if not isinstance(plan, dict) or not plan.get("segments"):
         raise ValueError("Connect the integrated node's 'segments' output to the long video sampler.")
     start = int(plan["range"]["start"]) - 1
     end = int(plan["range"]["end"]) - 1
     latent_continue = bool(plan.get("latent_continue", True))
-    refine_mode = refine_latent is not None
-    refine_denoise = max(0.05, min(1.0, float(refine_denoise)))
-    refine_audio_regen = refine_mode and str(refine_audio).lower() == "regenerate"
     lora_cache = _lora_cache()
     clip = plan.get("clip")
     frames_out = []
@@ -1195,27 +960,6 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
     previous_samples = None
     collected = []
     audio_mode = None
-    refine_layout = None
-    refine_video = refine_audio_latent = None
-    # Decode cleanup (gh/audio_ops.clean_generated_audio_start) keys off this
-    # mode, so the second pass must decode with the mode recorded on the latent
-    # itself - not the panel's current setting - to keep kept audio bit-exact.
-    refine_audio_mode = None
-    if refine_mode:
-        refine_layout = _resolve_refine_layout(refine_latent, plan)
-        refine_video, refine_audio_latent = nested_av_parts(refine_latent)
-        refine_audio_mode = str(
-            refine_latent.get("gh_h3_audio_mode") or plan.get("audio_mode") or "native"
-        )
-        total_tokens = sum(entry["video_tokens"] for entry in refine_layout["segments"])
-        total_steps = sum(entry["audio_steps"] for entry in refine_layout["segments"])
-        if total_tokens != int(refine_video.shape[2]) or total_steps != int(refine_audio_latent.shape[-1]):
-            raise ValueError(
-                "The refine latent's packed length does not match its layout metadata "
-                f"(video {int(refine_video.shape[2])} vs {total_tokens} tokens, "
-                f"audio {int(refine_audio_latent.shape[-1])} vs {total_steps} steps). "
-                "Re-run the first pass with the current plan to refresh the latent."
-            )
 
     for index in range(start, end + 1):
         segment = plan["segments"][index]
@@ -1239,76 +983,35 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
         seg_model = _apply_model_loras(model, segment.get("loras") or [], lora_cache)
 
         carry_t = carry_a = 0
-        carried = False
-        seg_vmask = seg_amask = None
-        absolute_start = None
-        if refine_mode:
-            entry = refine_layout["segments"][index]
-            video_slice = refine_video[
-                ..., entry["video_offset"]:entry["video_offset"] + entry["video_tokens"], :, :
-            ]
-            audio_slice = refine_audio_latent[
-                ..., entry["audio_offset"]:entry["audio_offset"] + entry["audio_steps"]
-            ]
-            video_mask = torch.ones(
-                (video_slice.shape[0], 1) + tuple(video_slice.shape[2:]),
-                device=video_slice.device, dtype=torch.float32,
-            )
-            # The video stream refines everywhere (pinned seam rows would keep
-            # their upscaled first-pass blur in an otherwise sharp pass).
-            audio_shape = (audio_slice.shape[0], 1, audio_slice.shape[2], audio_slice.shape[3])
-            if refine_audio_regen:
-                audio_mask = torch.ones(audio_shape, device=audio_slice.device, dtype=torch.float32)
-            else:
-                # Hold the first-pass audio bit-exact through the second pass.
-                audio_mask = torch.zeros(audio_shape, device=audio_slice.device, dtype=torch.float32)
+        carried = bool(latent_continue and previous_samples is not None)
+        if carried:
             bundle = dict(bundle)
-            bundle["av_latent"] = {
-                "samples": comfy.nested_tensor.NestedTensor((video_slice, audio_slice)),
-                "noise_mask": comfy.nested_tensor.NestedTensor((video_mask, audio_mask)),
-                "gh_h3_audio_mode": refine_audio_mode,
-            }
-            seg_vmask, seg_amask = video_mask, audio_mask
-            absolute_start = entry["frames_before"]
-            samples = _sample_bundle(
-                seg_model, bundle,
-                steps=int(steps), shift_video=float(shift_video), shift_audio=float(shift_audio),
-                sampler_name=sampler_name, scheduler=scheduler, seed=seg_seed, cfg=float(cfg),
-                progress=progress, refine_sigma_start=refine_denoise,
-                refine_audio_regen=refine_audio_regen,
-                external_noise=external_noise, external_sigmas=external_sigmas,
-                external_sampler=external_sampler,
+            bundle["av_latent"], carry_t, carry_a = _carry_latent(
+                previous_samples, bundle["av_latent"], context_noise=float(context_noise)
             )
-            seg_video, seg_audio = nested_av_parts(samples)
-        else:
-            carried = bool(latent_continue and previous_samples is not None)
-            if carried:
-                bundle = dict(bundle)
-                bundle["av_latent"], carry_t, carry_a = _carry_latent(
-                    previous_samples, bundle["av_latent"], context_noise=float(context_noise)
-                )
-                carried = carry_t > 0
-            samples = _sample_bundle(
-                seg_model, bundle,
-                steps=int(steps), shift_video=float(shift_video), shift_audio=float(shift_audio),
-                sampler_name=sampler_name, scheduler=scheduler, seed=seg_seed, cfg=float(cfg),
-                progress=progress,
-                external_noise=external_noise, external_sigmas=external_sigmas,
-                external_sampler=external_sampler,
-            )
-            if latent_continue:
-                # ``samples`` is the segment's output dict; carry its nested latent
-                # tensor into the next segment.
-                previous_samples = samples["samples"]
-            seg_video, seg_audio = nested_av_parts(samples)
-            seg_vmask, seg_amask = _collapse_av_mask(samples)
-            if carried:
-                seg_video = seg_video[..., carry_t:, :, :]
-                seg_audio = seg_audio[..., carry_a:]
-                if seg_vmask is not None:
-                    seg_vmask = seg_vmask[..., carry_t:, :, :]
-                if seg_amask is not None:
-                    seg_amask = seg_amask[..., carry_a:]
+            carried = carry_t > 0
+        samples = _sample_bundle(
+            seg_model, bundle,
+            steps=int(steps), shift_video=float(shift_video), shift_audio=float(shift_audio),
+            sampler_name=sampler_name, scheduler=scheduler, seed=seg_seed, cfg=float(cfg),
+            progress=progress,
+            external_noise=external_noise, external_sigmas=external_sigmas,
+            external_sampler=external_sampler,
+        )
+        if latent_continue:
+            # ``samples`` is the segment's output dict; carry its nested latent
+            # tensor into the next segment.
+            previous_samples = samples["samples"]
+        seg_video, seg_audio = nested_av_parts(samples)
+        seg_vmask, seg_amask = _collapse_av_mask(samples)
+        absolute_start = None
+        if carried:
+            seg_video = seg_video[..., carry_t:, :, :]
+            seg_audio = seg_audio[..., carry_a:]
+            if seg_vmask is not None:
+                seg_vmask = seg_vmask[..., carry_t:, :, :]
+            if seg_amask is not None:
+                seg_amask = seg_amask[..., carry_a:]
 
         if audio_mode is None:
             audio_mode = samples.get("gh_h3_audio_mode") or plan.get("audio_mode") or "native"
@@ -1356,24 +1059,17 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
             "frames": int(frames.shape[0]),
             "carried_frames": CARRY_FRAMES if carried else 0,
             "latent_continue": bool(latent_continue),
-            "refined": bool(refine_mode),
+            "refined": False,
             "duration_seconds": int(frames.shape[0]) / 24.0,
         })
         frames_out.append(frames)
         if audio is not None:
             audio_out.append(audio)
         cursor += int(frames.shape[0])
-        if refine_mode:
-            reports.append(
-                f"[segment {index + 1}] pass=refine seed={seg_seed} frames={int(frames.shape[0])} "
-                f"denoise={refine_denoise:.2f} audio={refine_audio} "
-                f"loras={len(segment.get('loras') or [])}"
-            )
-        else:
-            reports.append(
-                f"[segment {index + 1}] seed={seg_seed} frames={int(frames.shape[0])} "
-                f"carried={CARRY_FRAMES if carried else 0} loras={len(segment.get('loras') or [])}"
-            )
+        reports.append(
+            f"[segment {index + 1}] seed={seg_seed} frames={int(frames.shape[0])} "
+            f"carried={CARRY_FRAMES if carried else 0} loras={len(segment.get('loras') or [])}"
+        )
 
         if free_between_segments:
             try:
@@ -1387,15 +1083,10 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
     all_frames = torch.cat(frames_out, dim=0)
     all_audio = _concat_audio(audio_out)
     last_frame = all_frames[-1:]
-    if refine_mode:
-        av_latent_out = _assemble_refined_latent(refine_latent, refine_layout, collected, start, end)
-    else:
-        av_latent_out = _assemble_whole_av_latent(collected, audio_mode, latent_continue, start, end)
+    av_latent_out = _assemble_whole_av_latent(collected, audio_mode, latent_continue, start, end)
     segment_info = json.dumps(
         {
-            "pass": "refine" if refine_mode else "first",
-            "refine_denoise": float(refine_denoise) if refine_mode else None,
-            "refine_audio": str(refine_audio) if refine_mode else None,
+            "pass": "first",
             "range": {"start": start + 1, "end": end + 1},
             "latent_continue": latent_continue,
             "context_noise": float(context_noise),
@@ -1431,8 +1122,8 @@ class MiniMaxH3SamplerSettingsGH(io.ComfyNode):
                 io.Float.Input("shift_audio", default=3.0, min=0.01, max=100.0, step=0.01),
                 io.Combo.Input("sampler_name", options=SAMPLER_OPTIONS, default=DEFAULT_SAMPLER_NAME),
                 io.Combo.Input("scheduler", options=SCHEDULER_OPTIONS, default=DEFAULT_SCHEDULER_NAME),
-                io.Int.Input("seed", default=0, min=0, max=0xFFFFFFFFFFFFFFFF),
-                io.Combo.Input("seed_policy", options=["increment", "fixed"], default="increment"),
+                io.Int.Input("seed", default=0, min=0, max=0xFFFFFFFFFFFFFFFF, extra_dict={"hidden": True}),
+                io.Combo.Input("seed_policy", options=["increment", "fixed"], default="increment", extra_dict={"hidden": True}),
                 io.Float.Input("context_noise", default=0.0, min=0.0, max=1.0, step=0.05),
                 io.Float.Input("cfg", default=1.0, min=0.0, max=20.0, step=0.1),
             ],
@@ -1474,15 +1165,16 @@ class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):
             inputs=[
                 io.Model.Input("model"),
                 io.Custom(SEGMENT_TYPE).Input("segments", display_name="segments"),
-                io.Int.Input("steps", default=4, min=1, max=1000),
-                io.Float.Input("shift_video", default=12.0, min=0.01, max=100.0, step=0.01, advanced=True),
-                io.Float.Input("shift_audio", default=3.0, min=0.01, max=100.0, step=0.01, advanced=True),
-                io.Combo.Input("sampler_name", options=SAMPLER_OPTIONS, default=DEFAULT_SAMPLER_NAME, optional=True),
-                io.Combo.Input("scheduler", options=SCHEDULER_OPTIONS, default=DEFAULT_SCHEDULER_NAME, optional=True),
+                io.Int.Input("steps", default=4, min=1, max=1000, extra_dict={"hidden": True}),
+                io.Float.Input("shift_video", default=12.0, min=0.01, max=100.0, step=0.01, advanced=True, extra_dict={"hidden": True}),
+                io.Float.Input("shift_audio", default=3.0, min=0.01, max=100.0, step=0.01, advanced=True, extra_dict={"hidden": True}),
+                io.Combo.Input("sampler_name", options=SAMPLER_OPTIONS, default=DEFAULT_SAMPLER_NAME, optional=True, extra_dict={"hidden": True}),
+                io.Combo.Input("scheduler", options=SCHEDULER_OPTIONS, default=DEFAULT_SCHEDULER_NAME, optional=True, extra_dict={"hidden": True}),
                 io.Int.Input("seed", default=0, min=0, max=0xFFFFFFFFFFFFFFFF),
                 io.Combo.Input("seed_policy", options=["increment", "fixed"], default="increment"),
                 io.Float.Input(
                     "context_noise", default=0.0, min=0.0, max=1.0, step=0.05,
+                    extra_dict={"hidden": True},
                     tooltip=(
                         "Noise applied to the carried context frames at each seam. "
                         "0 keeps the previous tail exactly; 0.1-0.3 lets the sampler "
@@ -1490,7 +1182,7 @@ class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):
                         "Audio remains held for speech continuity."
                     ),
                 ),
-                io.Float.Input("cfg", default=1.0, min=0.0, max=20.0, step=0.1, advanced=True),
+                io.Float.Input("cfg", default=1.0, min=0.0, max=20.0, step=0.1, advanced=True, extra_dict={"hidden": True}),
                 io.Boolean.Input(
                     "release_clip", default=True, advanced=True,
                     tooltip="Unload the H3 text encoder before each segment's sampling and reload it for the next conditioning. Disable only if VRAM allows keeping CLIP and the DiT together.",
@@ -1516,32 +1208,6 @@ class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):
                     "sampler", optional=True, display_name="采样器",
                     tooltip="External KSampler-compatible SAMPLER primitive. When connected the model switches to the native FLOW_AV audio-clock mode so standard samplers advance audio correctly. Leave unconnected for the built-in dual-clock euler.",
                 ),
-                io.Latent.Input(
-                    "refine_latent", optional=True,
-                    tooltip=(
-                        "Second-pass AV latent (chain: this node's av_latent -> LKH3AVUpscale -> "
-                        "here). When connected, the node re-samples the upscaled latent with a "
-                        "truncated schedule (HD second pass) instead of generating fresh latents. "
-                        "The first pass must have run the full segment range so the latent covers "
-                        "every segment."
-                    ),
-                ),
-                io.Float.Input(
-                    "refine_denoise", default=0.45, min=0.05, max=1.0, step=0.05,
-                    tooltip=(
-                        "Starting sigma of the truncated second-pass schedule (= denoise "
-                        "strength). 0.3-0.5 sharpens upscaled latents; 1.0 regenerates fully. "
-                        "Ignored by the first pass."
-                    ),
-                ),
-                io.Combo.Input(
-                    "refine_audio", options=["keep", "regenerate"], default="keep",
-                    tooltip=(
-                        "Second-pass audio policy. keep: hold the first-pass audio bit-exact "
-                        "(locked mask). regenerate: re-denoise the audio stream as well. "
-                        "Ignored by the first pass."
-                    ),
-                ),
             ],
             outputs=[
                 io.Image.Output("frames", display_name="frames"),
@@ -1553,7 +1219,7 @@ class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):
                     "av_latent", display_name="av_latent",
                     tooltip=(
                         "Packed AV latent of the executed range with lk_layout metadata. "
-                        "Feed through LKH3AVUpscale and back into refine_latent for the HD "
+                        "Feed through LKH3AVUpscale for downstream HD / upscale chains "
                         "second pass."
                     ),
                 ),
@@ -1571,8 +1237,7 @@ class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):
                 seed=0, seed_policy="increment", cfg=1.0, context_noise=0.0,
                 release_clip=True, free_between_segments=True,
                 sampler_settings=None,
-                noise=None, sigmas=None, sampler=None,
-                refine_latent=None, refine_denoise=0.45, refine_audio="keep"):
+                noise=None, sigmas=None, sampler=None):
         params = {
             "steps": steps, "shift_video": shift_video, "shift_audio": shift_audio,
             "sampler_name": sampler_name, "scheduler": scheduler,
@@ -1592,6 +1257,5 @@ class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):
             release_clip=release_clip, free_between_segments=free_between_segments,
             context_noise=params["context_noise"],
             external_noise=noise, external_sigmas=sigmas, external_sampler=sampler,
-            refine_latent=refine_latent, refine_denoise=refine_denoise, refine_audio=refine_audio,
         ))
 

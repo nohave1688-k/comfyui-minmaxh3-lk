@@ -124,25 +124,9 @@
       "context_noise": {
         "name": "Context noise"
       },
-      "refine_latent": {
-        "name": "二跑潜空间",
-        "tooltip": "接放大后的 AV 潜空间（本节点 av_latent → AV潜空间放大 → 此口）。连接后本节点以截断调度对放大潜空间做低噪二跑（高清化），而不是重新生成。一跑必须跑满全部分段范围。"
-      },
-      "refine_denoise": {
-        "name": "二跑去噪强度",
-        "tooltip": "截断调度的起始 sigma（= 去噪强度）。0.3–0.5 可锐化放大后的潜空间；1.0 等于完全重采。一跑忽略。"
-      },
       "noise": { "name": "噪声" },
       "sigmas": { "name": "调度表" },
-      "sampler": { "name": "采样器" },
-      "refine_audio": {
-        "name": "二跑音频",
-        "options": {
-          "keep": "保留一跑音频",
-          "regenerate": "重新生成音频"
-        },
-        "tooltip": "二跑音频策略。keep：锁定一跑音频（逐位一致）。regenerate：音频也参与低噪重采。一跑忽略。"
-      }
+      "sampler": { "name": "采样器" }
     },
     "outputs": {
       "0": {

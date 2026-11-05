@@ -1905,6 +1905,27 @@ app.registerExtension({
         await app.ensureNodesRegistered(new Set(RH_NODE_IDS));
     },
     async beforeRegisterNodeDef(nodeType, nodeData) {
+        if (nodeData.name === "LKH3LongVideo") {
+            // The sampler face stays minimal: the sampling recipe lives in the
+            // 采样设置 node / external NOISE-SIGMAS-SAMPLER primitives. Hidden
+            // widgets still serialize, so legacy workflows keep their values.
+            const previousLongVideo = nodeType.prototype.onNodeCreated;
+            nodeType.prototype.onNodeCreated = function() {
+                const result = previousLongVideo?.apply(this, arguments);
+                const hideNames = new Set([
+                    "steps", "shift_video", "shift_audio", "sampler_name", "scheduler",
+                    "seed", "control_after_generate", "seed_policy", "context_noise", "cfg",
+                ]);
+                for (const w of this.widgets || []) {
+                    if (hideNames.has(w.name)) {
+                        w.hidden = true;
+                        w.options = { ...(w.options || {}), hidden: true };
+                    }
+                }
+                return result;
+            };
+            return;
+        }
         if (nodeData.name === "LKH3Shot") {
             const previousShot = nodeType.prototype.onNodeCreated;
             nodeType.prototype.onNodeCreated = function() {
