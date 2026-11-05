@@ -675,7 +675,7 @@ class MiniMaxH3ShotsGH(io.ComfyNode):
         shots = [shot for shot in (shot_1, shot_2, shot_3, shot_4,
                                    shot_5, shot_6, shot_7, shot_8)
                  if shot is not None]
-        _, _, plan = build_plan_from_shot_nodes(
+        plan = build_plan_from_shot_nodes(
             settings=settings, shots=shots,
             latent_continue=latent_continue, range_start=range_start, range_end=range_end,
         )
