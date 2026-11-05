@@ -1092,14 +1092,25 @@ class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):
             inputs=[
                 io.Model.Input("model"),
                 io.Custom(SEGMENT_TYPE).Input("segments", display_name="segments"),
-                io.Vae.Input(
-                    "video_vae", optional=True, display_name="视频 VAE",
-                    tooltip="视频 VAE（从 MiniMaxH3模型设置 节点的 视频 VAE 输出连线）。未连接时按模型设置里的名字加载。",
+                # Hidden legacy widgets: still serialize so old workflows keep
+                # their values; the recipe lives in 采样设置 / primitives.
+                # NOTE: declaration order == widgets_values order — keep it
+                # identical to the pre-refactor face so saved workflows restore
+                # without value shifts.
+                io.Int.Input("steps", default=4, min=1, max=1000, extra_dict={"hidden": True}),
+                io.Float.Input("shift_video", default=12.0, min=0.01, max=100.0, step=0.01, extra_dict={"hidden": True}),
+                io.Float.Input("shift_audio", default=3.0, min=0.01, max=100.0, step=0.01, extra_dict={"hidden": True}),
+                io.Combo.Input("sampler_name", options=SAMPLER_OPTIONS, default=DEFAULT_SAMPLER_NAME, optional=True, extra_dict={"hidden": True}),
+                io.Combo.Input("scheduler", options=SCHEDULER_OPTIONS, default=DEFAULT_SCHEDULER_NAME, optional=True, extra_dict={"hidden": True}),
+                io.Int.Input("seed", default=0, min=0, max=0xFFFFFFFFFFFFFFFF, extra_dict={"hidden": True}),
+                io.Combo.Input("seed_policy", options=["increment", "fixed"], default="increment", extra_dict={"hidden": True}),
+                io.Float.Input("context_noise", default=0.0, min=0.0, max=1.0, step=0.05, extra_dict={"hidden": True}),
+                io.Float.Input("cfg", default=1.0, min=0.0, max=20.0, step=0.1, extra_dict={"hidden": True}),
+                io.Boolean.Input(
+                    "release_clip", default=True, advanced=True,
+                    tooltip="Unload the H3 text encoder before each segment's sampling and reload it for the next conditioning. Disable only if VRAM allows keeping CLIP and the DiT together.",
                 ),
-                io.Vae.Input(
-                    "audio_vae", optional=True, display_name="音频 VAE",
-                    tooltip="音频 VAE（从 MiniMaxH3模型设置 节点的 音频 VAE 输出连线）。未连接时按模型设置里的名字加载。",
-                ),
+                io.Boolean.Input("free_between_segments", default=True, advanced=True),
                 io.Custom("LK_H3_SAMPLER_SETTINGS").Input(
                     "sampler_settings", optional=True, display_name="采样设置",
                     tooltip=(
@@ -1120,22 +1131,16 @@ class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):
                     "sampler", optional=True, display_name="采样器",
                     tooltip="External KSampler-compatible SAMPLER primitive. When connected the model switches to the native FLOW_AV audio-clock mode so standard samplers advance audio correctly. Leave unconnected for the built-in dual-clock euler.",
                 ),
-                io.Boolean.Input(
-                    "release_clip", default=True, advanced=True,
-                    tooltip="Unload the H3 text encoder before each segment's sampling and reload it for the next conditioning. Disable only if VRAM allows keeping CLIP and the DiT together.",
+                # New sockets are appended after the legacy ones so saved
+                # workflows keep their input-slot indices stable.
+                io.Vae.Input(
+                    "video_vae", optional=True, display_name="视频 VAE",
+                    tooltip="视频 VAE（从 MiniMaxH3模型设置 节点的 视频 VAE 输出连线）。未连接时按模型设置里的名字加载。",
                 ),
-                io.Boolean.Input("free_between_segments", default=True, advanced=True),
-                # Hidden legacy widgets: still serialize so old workflows keep
-                # their values; the recipe lives in 采样设置 / primitives.
-                io.Int.Input("steps", default=4, min=1, max=1000, extra_dict={"hidden": True}),
-                io.Float.Input("shift_video", default=12.0, min=0.01, max=100.0, step=0.01, extra_dict={"hidden": True}),
-                io.Float.Input("shift_audio", default=3.0, min=0.01, max=100.0, step=0.01, extra_dict={"hidden": True}),
-                io.Combo.Input("sampler_name", options=SAMPLER_OPTIONS, default=DEFAULT_SAMPLER_NAME, optional=True, extra_dict={"hidden": True}),
-                io.Combo.Input("scheduler", options=SCHEDULER_OPTIONS, default=DEFAULT_SCHEDULER_NAME, optional=True, extra_dict={"hidden": True}),
-                io.Int.Input("seed", default=0, min=0, max=0xFFFFFFFFFFFFFFFF, extra_dict={"hidden": True}),
-                io.Combo.Input("seed_policy", options=["increment", "fixed"], default="increment", extra_dict={"hidden": True}),
-                io.Float.Input("context_noise", default=0.0, min=0.0, max=1.0, step=0.05, extra_dict={"hidden": True}),
-                io.Float.Input("cfg", default=1.0, min=0.0, max=20.0, step=0.1, extra_dict={"hidden": True}),
+                io.Vae.Input(
+                    "audio_vae", optional=True, display_name="音频 VAE",
+                    tooltip="音频 VAE（从 MiniMaxH3模型设置 节点的 音频 VAE 输出连线）。未连接时按模型设置里的名字加载。",
+                ),
             ],
             outputs=[
                 io.Latent.Output(
