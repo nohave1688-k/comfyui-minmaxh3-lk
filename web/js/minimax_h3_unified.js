@@ -200,15 +200,6 @@ function setWidget(node, name, value) {
     w.callback?.call(w, w.value);
 }
 function cleanPrompt(value) { return value && value !== "(none)" ? value : ""; }
-function setMediaWidget(node, name, value) {
-    const w = widget(node, name); if (!w) return;
-    // Media slots are optional STRING inputs. Keep unused slots truly empty;
-    // the old Combo sentinel "(none)" is not a valid uploaded filename.
-    const next = value === null || value === undefined || value === "" || value === "(none)" ? "" : value;
-    if (w.value === next) return;
-    w.value = next;
-    w.callback?.call(w, w.value);
-}
 function normalizeIntWidget(node, name, fallback, minimum, maximum) {
     const w = widget(node, name); if (!w) return fallback;
     const parsed = Number(w.value);
@@ -236,12 +227,6 @@ function hideWidget(w) {
 function make(tag, css = {}, text = "") {
     const el = document.createElement(tag); Object.assign(el.style, css);
     if (text) el.textContent = text; return el;
-}
-function kindOf(file) {
-    if (file.type?.startsWith("image/") || /\.(png|jpe?g|webp|bmp|gif)$/i.test(file.name)) return "image";
-    if (file.type?.startsWith("video/") || /\.(mp4|mov|webm|mkv|avi)$/i.test(file.name)) return "video";
-    if (file.type?.startsWith("audio/") || /\.(mp3|wav|flac|m4a|aac|ogg|oga|opus|wma|aif|aiff|alac|amr|caf|ac3|mp2)$/i.test(file.name)) return "audio";
-    return null;
 }
 function fileUrl(name) {
     if (!name || name === "(none)") return "";
@@ -599,7 +584,10 @@ function createPanel(node) {
             })
             .finally(() => {
                 segmentLorasLoading = false;
-                if (!restoringState) rebuildSegmentWidgets();
+                // Always rebuild: the widget tree may have been restored while
+                // this fetch was in flight, and the rebuild itself is safe at
+                // any point (it renders whatever `segments` currently holds).
+                rebuildSegmentWidgets();
             });
     }
     function refreshSegmentLoras() {
@@ -782,6 +770,7 @@ function createPanel(node) {
         segmentRange.end = Math.max(1, Math.min(segments.length, segmentRange.end));
         segmentRange.start = Math.max(1, Math.min(segmentRange.end, segmentRange.start));
         activeSegment = Math.max(0, Math.min(segments.length - 1, activeSegment));
+        if (globalWidgets.count) globalWidgets.count.value = String(segments.length);
         refreshRangeOptions();
         syncSegmentState();
         rebuildSegmentWidgets();
@@ -937,8 +926,9 @@ function createPanel(node) {
             return [x, y];
         }
         function hitRegion(x, y) {
-            for (let i = regions.length - 1; i >= 0; i -= 1) {
-                const region = regions[i];
+            // Forward iteration: sub-regions (mute / strength / remove) are
+            // pushed before the chip-wide insert region and must win.
+            for (const region of regions) {
                 if (x >= region.x && x <= region.x + region.w && y >= region.y && y <= region.y + region.h) return region;
             }
             return null;
@@ -1147,13 +1137,12 @@ function createPanel(node) {
             drag.hoverIdx = -1;
             drag.modDrag = null;
         }
-        function commitReorder() {
-            const listName = drag.list;
-            if (!listName || drag.hoverIdx < 0 || drag.fromIdx < 0 || drag.fromIdx === drag.hoverIdx) return;
+        function commitReorder(listName, fromIdx, hoverIdx) {
+            if (!listName || hoverIdx < 0 || fromIdx < 0 || fromIdx === hoverIdx) return;
             const items = seg[listName];
-            if (!Array.isArray(items) || drag.fromIdx >= items.length) return;
-            const to = Math.max(0, Math.min(items.length - 1, drag.hoverIdx));
-            const [moved] = items.splice(drag.fromIdx, 1);
+            if (!Array.isArray(items) || fromIdx >= items.length) return;
+            const to = Math.max(0, Math.min(items.length - 1, hoverIdx));
+            const [moved] = items.splice(fromIdx, 1);
             items.splice(to, 0, moved);
             syncSegmentState();
         }
@@ -1236,9 +1225,11 @@ function createPanel(node) {
                 const pending = drag.pending;
                 const moved = Math.abs(lx - drag.downX) + Math.abs(ly - drag.downY);
                 const wasDragging = drag.active && drag.started;
+                // Capture the drag target before clearDrag wipes the state.
+                const reorder = { list: drag.list, fromIdx: drag.fromIdx, hoverIdx: drag.hoverIdx };
                 clearDrag();
                 if (wasDragging) {
-                    commitReorder();
+                    commitReorder(reorder.list, reorder.fromIdx, reorder.hoverIdx);
                     return true;
                 }
                 if (pending && moved <= 6) runAction(pending);
