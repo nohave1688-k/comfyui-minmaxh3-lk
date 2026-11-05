@@ -439,6 +439,72 @@ def build_multi_plan(*, aspect, megapixels, segments_json, clip_name, video_vae_
     return preview, preview["refmods"], plan
 
 
+def build_plan_from_shots(*, settings, segments_json, latent_continue=True,
+                          range_start=1, range_end=1, connected_media=None,
+                          connected_apply="all segments"):
+    """Assemble the long-video plan for the two-node (settings + shots) chain.
+
+    ``settings`` is the dict produced by the LKH3Settings node (model names
+    and global canvas/audio options); the shot table comes from the shots
+    node's panel payload.  Same plan keys as :func:`build_multi_plan`, except
+    the CLIP stays None (the sampler lazy-loads it) and no start preview is
+    built — the sampler builds per-segment bundles during the run.
+    """
+    if not isinstance(settings, dict) or not settings:
+        raise ValueError("请先连接「MiniMaxH3模型设置」节点：分镜编排需要模型设置输入。")
+    config = parse_segments(segments_json)
+    try:
+        start = max(1, min(MAX_SEGMENTS, int(range_start)))
+        end = max(1, min(MAX_SEGMENTS, int(range_end)))
+    except (TypeError, ValueError):
+        start, end = 1, 1
+    if start > end:
+        start, end = end, start
+    config["range"] = {"start": start, "end": end}
+    config["latent_continue"] = bool(latent_continue)
+
+    aspect = settings.get("aspect", "adaptive")
+    megapixels = settings.get("megapixels", 0.5)
+    clip_name = settings.get("clip_name")
+    video_vae_name = settings.get("video_vae_name")
+    audio_vae_name = settings.get("audio_vae_name")
+    if not clip_name:
+        raise ValueError("模型设置节点未提供 CLIP 模型，请在设置节点上选择。")
+
+    collected = connected_media or {}
+    connected_by_segment = _distribute_connected(collected, connected_apply, config)
+    connected_first = connected_by_segment.get(int(config["range"]["start"])) or {}
+    source_width, source_height = _connected_source_size(connected_first)
+    if source_width is None:
+        source_width, source_height = _segment_source_size(config["segments"][0])
+    width, height = _media().calculate_canvas(aspect, megapixels, source_width, source_height)
+    for segment in config["segments"]:
+        segment["length"] = _media().calculate_length(segment["duration"])
+
+    video_vae = comfy_nodes.VAELoader().load_vae(video_vae_name)[0] if video_vae_name else None
+    audio_vae = comfy_nodes.VAELoader().load_vae(audio_vae_name)[0] if audio_vae_name else None
+
+    return {
+        **config,
+        "width": width,
+        "height": height,
+        "clip_name": clip_name,
+        "video_vae_name": video_vae_name,
+        "audio_vae_name": audio_vae_name,
+        "aspect": aspect,
+        "megapixels": megapixels,
+        "audio_mode": settings.get("audio_mode", "native"),
+        "audio_denoise_strength": 0.0,
+        "strict_prompt_tags": False,
+        "ref_image_size": settings.get("ref_image_size", "match"),
+        "clip": None,
+        "video_vae": video_vae,
+        "audio_vae": audio_vae,
+        "connected_by_segment": connected_by_segment,
+        "preview": None,
+    }
+
+
 def _load_clip(plan):
     clip = comfy_nodes.CLIPLoader().load_clip(plan["clip_name"], "minimax")[0]
     plan["clip"] = clip

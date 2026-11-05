@@ -166,5 +166,74 @@
         "tooltip": "放大后的打包 AV 潜空间；接长视频采样节点的 refine_latent。"
       }
     }
+  },
+  "LKH3Settings": {
+    "display_name": "MiniMaxH3模型设置（LK)",
+    "description": "全局模型与画布设置；输出连接到分镜编排节点的模型设置输入。",
+    "inputs": {
+      "clip_name": { "name": "CLIP模型" },
+      "video_vae_name": { "name": "视频 VAE" },
+      "audio_vae_name": { "name": "音频 VAE" },
+      "aspect": {
+        "name": "宽高比例",
+        "options": {
+          "adaptive": "自适应",
+          "16:9": "16:9",
+          "9:16": "9:16",
+          "3:2": "3:2",
+          "2:3": "2:3",
+          "4:3": "4:3",
+          "3:4": "3:4",
+          "1:1": "1:1",
+          "21:9": "21:9"
+        }
+      },
+      "megapixels": { "name": "百万像素" },
+      "ref_image_size": {
+        "name": "参考素材尺寸",
+        "options": {
+          "match": "匹配",
+          "1.2x": "1.2倍",
+          "1.5x": "1.5倍",
+          "2x": "2倍",
+          "max": "最大值"
+        }
+      },
+      "audio_mode": {
+        "name": "音频参考模式",
+        "options": {
+          "lock_source": "原生输出",
+          "reference_only": "仅参考音频",
+          "native": "自由生成"
+        }
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "模型设置",
+        "tooltip": "连接到 MiniMaxH3分镜编排 节点的模型设置输入。"
+      }
+    }
+  },
+  "LKH3Shots": {
+    "display_name": "MiniMaxH3分镜编排（LK)",
+    "description": "八个固定分镜板块与逐镜头连线点；与 MiniMaxH3模型设置 节点搭配使用，输出接长视频采样节点。",
+    "inputs": {
+      "settings": { "name": "模型设置" },
+      "latent_continue": { "name": "潜空间续接" },
+      "range_start": { "name": "运行范围·起" },
+      "range_end": { "name": "运行范围·止" },
+      "conn_first_frame": { "name": "首帧（连线）" },
+      "conn_last_frame": { "name": "尾帧（连线）" },
+      "conn_image": { "name": "参考图片（连线）" },
+      "conn_video": { "name": "参考视频（连线）" },
+      "conn_audio": { "name": "参考音频（连线）" }
+    },
+    "outputs": {
+      "0": {
+        "name": "segments",
+        "tooltip": "长视频分镜计划；接长视频采样节点。"
+      }
+    }
   }
 }

@@ -166,5 +166,31 @@
         "tooltip": "Upscaled packed AV latent; connect to the long video sampler's refine_latent."
       }
     }
+  },
+  "LKH3Settings": {
+    "display_name": "MiniMaxH3 Model Settings (LK)",
+    "description": "Shared MiniMax H3 model/canvas settings; connect to the shots node.",
+    "outputs": {
+      "0": {
+        "name": "settings",
+        "tooltip": "Connect to the MiniMaxH3 Shot Storyboard node's settings input."
+      }
+    }
+  },
+  "LKH3Shots": {
+    "display_name": "MiniMaxH3 Shot Storyboard (LK)",
+    "description": "Eight fixed shot blocks with per-shot link points; pairs with the Model Settings node. Output connects to the long video sampler.",
+    "inputs": {
+      "settings": { "name": "settings" },
+      "latent_continue": { "name": "latent continue" },
+      "range_start": { "name": "run range start" },
+      "range_end": { "name": "run range end" }
+    },
+    "outputs": {
+      "0": {
+        "name": "segments",
+        "tooltip": "Long-video segment plan; connect to the long video sampler."
+      }
+    }
   }
 }

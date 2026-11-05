@@ -34,12 +34,16 @@ from .gh import prompt_optimizer as _gh_prompt_optimizer  # noqa: F401  (registe
 
 NODE_CLASS_MAPPINGS = {
     "LKH3Studio": _gh_nodes.MiniMaxH3IntegrationGH,
+    "LKH3Settings": _gh_nodes.MiniMaxH3SettingsGH,
+    "LKH3Shots": _gh_nodes.MiniMaxH3ShotsGH,
     "LKH3LongVideo": _gh_long_video.MiniMaxH3LongVideoRunnerGH,
     "LKH3AVUpscale": _gh_latent_upscale.MiniMaxH3AVUpscaleGH,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "LKH3Studio": "MiniMaxH3长视频操作台（LK)",
+    "LKH3Settings": "MiniMaxH3模型设置（LK)",
+    "LKH3Shots": "MiniMaxH3分镜编排（LK)",
     "LKH3LongVideo": "MiniMax-H3 长视频分段采样（LK）",
     "LKH3AVUpscale": "MiniMax-H3 AV潜空间放大（LK）",
 }

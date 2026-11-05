@@ -27,6 +27,7 @@ from .long_video import (
     MAX_SEGMENTS,
     SEGMENT_TYPE,
     build_multi_plan,
+    build_plan_from_shots,
 )
 
 
@@ -547,6 +548,137 @@ class MiniMaxH3IntegrationGH(io.ComfyNode):
             audio_vae_name=audio_vae_name, audio_mode=audio_mode,
             audio_denoise_strength=audio_denoise_strength,
             strict_prompt_tags=strict_prompt_tags, ref_image_size=ref_image_size,
+            connected_media=_collect_connected_media(conn_media),
+            connected_apply=conn_apply,
+        )
+        return io.NodeOutput(plan)
+
+
+class MiniMaxH3SettingsGH(io.ComfyNode):
+    """Global model/canvas settings for the two-node long-video chain.
+
+    Pairs with :class:`MiniMaxH3ShotsGH`: connect this node's output to the
+    shots node's ``settings`` input.  Model weights themselves stay external
+    and are lazy-loaded by the sampler.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LKH3Settings",
+            display_name="MiniMaxH3模型设置（LK)",
+            category=NODE_CATEGORY,
+            description="Shared MiniMax H3 model/canvas settings; connect to the shots node.",
+            inputs=[
+                io.Combo.Input(
+                    "clip_name",
+                    options=folder_paths.get_filename_list("text_encoders"),
+                    default=_default_model(folder_paths.get_filename_list("text_encoders"), DEFAULT_CLIP),
+                ),
+                io.Combo.Input(
+                    "video_vae_name",
+                    options=folder_paths.get_filename_list("vae"),
+                    default=_default_model(folder_paths.get_filename_list("vae"), DEFAULT_VIDEO_VAE),
+                ),
+                io.Combo.Input(
+                    "audio_vae_name",
+                    options=folder_paths.get_filename_list("vae"),
+                    default=_default_model(folder_paths.get_filename_list("vae"), DEFAULT_AUDIO_VAE),
+                ),
+                io.Combo.Input("aspect", options=list(ASPECTS), default="adaptive"),
+                io.Float.Input("megapixels", default=0.5, min=0.2, max=2.0, step=0.1, round=0.1),
+                io.Combo.Input(
+                    "ref_image_size",
+                    options=["match", "1.2x", "1.5x", "2x", "max"],
+                    default="match",
+                ),
+                io.Combo.Input(
+                    "audio_mode",
+                    options=["lock_source", "reference_only", "native"],
+                    default="lock_source",
+                ),
+            ],
+            outputs=[
+                io.Custom("LK_H3_SETTINGS").Output(
+                    display_name="模型设置",
+                    tooltip="Connect to the MiniMaxH3分镜编排 node's settings input",
+                ),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, clip_name, video_vae_name, audio_vae_name, aspect, megapixels,
+                ref_image_size, audio_mode):
+        return io.NodeOutput({
+            "clip_name": clip_name,
+            "video_vae_name": video_vae_name,
+            "audio_vae_name": audio_vae_name,
+            "aspect": aspect,
+            "megapixels": megapixels,
+            "ref_image_size": ref_image_size,
+            "audio_mode": audio_mode,
+        })
+
+
+class MiniMaxH3ShotsGH(io.ComfyNode):
+    """Eight fixed shot blocks and their wiring in one orchestration node.
+
+    Receives global settings from :class:`MiniMaxH3SettingsGH` and emits the
+    segment plan consumed by the long-video sampler.  The eight blocks are
+    managed by the panel (segments_json); per-shot media link points live
+    inside each block.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        schema_inputs = [
+            io.Custom("LK_H3_SETTINGS").Input(
+                "settings",
+                display_name="模型设置",
+                tooltip="Connect the MiniMaxH3模型设置 node output.",
+            ),
+            io.Boolean.Input(
+                "latent_continue",
+                default=True,
+                tooltip="Carry the previous segment's latent tail into the next shot.",
+            ),
+            io.Int.Input(
+                "range_start", default=1, min=1, max=MAX_SEGMENTS, step=1,
+                tooltip="First shot to run (1-based).",
+            ),
+            io.Int.Input(
+                "range_end", default=1, min=1, max=MAX_SEGMENTS, step=1,
+                tooltip="Last shot to run (inclusive).",
+            ),
+            io.String.Input(
+                "segments_json",
+                default="",
+                optional=True,
+                extra_dict={"hidden": True},
+                tooltip="Shot table (managed by the panel; 8 fixed shots)",
+            ),
+        ]
+        schema_inputs.extend(_connected_media_inputs())
+        return io.Schema(
+            node_id="LKH3Shots",
+            display_name="MiniMaxH3分镜编排（LK)",
+            category=NODE_CATEGORY,
+            description="Eight fixed shot blocks with per-shot link points; pairs with MiniMaxH3模型设置.",
+            inputs=schema_inputs,
+            outputs=[
+                io.Custom(SEGMENT_TYPE).Output(
+                    display_name="segments",
+                    tooltip="Long-video segment plan; connect to the long-video sampler",
+                ),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, settings, latent_continue=True, range_start=1, range_end=1,
+                segments_json="", conn_apply="all segments", **conn_media):
+        _, _, plan = build_plan_from_shots(
+            settings=settings, segments_json=segments_json,
+            latent_continue=latent_continue, range_start=range_start, range_end=range_end,
             connected_media=_collect_connected_media(conn_media),
             connected_apply=conn_apply,
         )
