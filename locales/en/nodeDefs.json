@@ -132,6 +132,9 @@
         "name": "refine denoise",
         "tooltip": "Starting sigma of the truncated second-pass schedule (= denoise strength). 0.3-0.5 sharpens upscaled latents; 1.0 regenerates fully. Ignored by the first pass."
       },
+      "noise": { "name": "noise" },
+      "sigmas": { "name": "sigmas" },
+      "sampler": { "name": "sampler" },
       "refine_audio": {
         "name": "refine audio",
         "options": {

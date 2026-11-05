@@ -1072,22 +1072,36 @@ def _assemble_refined_latent(refine_latent, layout, collected, start, end):
 
 def _sample_bundle(model, bundle, *, steps, shift_video, shift_audio,
                    sampler_name, scheduler, seed, cfg, progress=None,
-                   refine_sigma_start=None, refine_audio_regen=False):
+                   refine_sigma_start=None, refine_audio_regen=False,
+                   external_noise=None, external_sigmas=None, external_sampler=None):
     av_latent = bundle["av_latent"]
-    patched_model, sampler, default_sigmas = setup_dual_clock_sampling_gh(
-        model, av_latent, steps, shift_video, shift_audio, sampler_name, scheduler
+    # An external SAMPLER requires the native FLOW_AV model-sampling patch
+    # (any sampler name other than dual_clock_euler selects it) so standard
+    # samplers advance the audio clock correctly; the external sampler object
+    # then replaces the built-in one.
+    effective_sampler_name = "euler" if external_sampler is not None else sampler_name
+    patched_model, _sampler_builtin, default_sigmas = setup_dual_clock_sampling_gh(
+        model, av_latent, steps, shift_video, shift_audio, effective_sampler_name, scheduler
     )
-    if refine_sigma_start is not None:
+    sampler = external_sampler if external_sampler is not None else _sampler_builtin
+    if external_sigmas is not None:
+        # User-owned schedule: used as-is for every pass (refine_denoise does
+        # not truncate an external schedule).
+        sigmas = external_sigmas
+    elif refine_sigma_start is not None:
         sigmas = _refine_sigmas(patched_model, scheduler, steps, refine_sigma_start, shift_video)
     else:
         sigmas = default_sigmas
     guider = _make_guider(patched_model, bundle["positive"], cfg)
     samples = av_latent["samples"]
-    noise = _make_noise(samples, seed)
-    if refine_audio_regen:
-        noise = _fix_regenerate_audio_noise(
-            noise, av_latent, float(sigmas[0]), shift_video, shift_audio, patched_model
-        )
+    if external_noise is not None:
+        noise = external_noise.generate_noise(samples, int(seed) & 0x7FFFFFFFFFFFFFFF)
+    else:
+        noise = _make_noise(samples, seed)
+        if refine_audio_regen:
+            noise = _fix_regenerate_audio_noise(
+                noise, av_latent, float(sigmas[0]), shift_video, shift_audio, patched_model
+            )
     disable_pbar = not getattr(comfy.utils, "PROGRESS_BAR_ENABLED", True)
     previewer = None
     try:
@@ -1156,6 +1170,7 @@ def torchaudio_resample(waveform, source_rate, target_rate):
 def run_long_video(model, segments, *, steps, shift_video, shift_audio,
                    sampler_name, scheduler, seed, seed_policy, cfg,
                    release_clip, free_between_segments, context_noise=0.0,
+                   external_noise=None, external_sigmas=None, external_sampler=None,
                    refine_latent=None, refine_denoise=0.45, refine_audio="keep"):
     plan = segments
     if not isinstance(plan, dict) or not plan.get("segments"):
@@ -1261,6 +1276,8 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
                 sampler_name=sampler_name, scheduler=scheduler, seed=seg_seed, cfg=float(cfg),
                 progress=progress, refine_sigma_start=refine_denoise,
                 refine_audio_regen=refine_audio_regen,
+                external_noise=external_noise, external_sigmas=external_sigmas,
+                external_sampler=external_sampler,
             )
             seg_video, seg_audio = nested_av_parts(samples)
         else:
@@ -1276,6 +1293,8 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
                 steps=int(steps), shift_video=float(shift_video), shift_audio=float(shift_audio),
                 sampler_name=sampler_name, scheduler=scheduler, seed=seg_seed, cfg=float(cfg),
                 progress=progress,
+                external_noise=external_noise, external_sigmas=external_sigmas,
+                external_sampler=external_sampler,
             )
             if latent_continue:
                 # ``samples`` is the segment's output dict; carry its nested latent
@@ -1485,6 +1504,18 @@ class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):
                         "sampler, scheduler, seed, seed policy, context noise, cfg)."
                     ),
                 ),
+                io.Noise.Input(
+                    "noise", optional=True, display_name="噪声",
+                    tooltip="External NOISE primitive. Generates the nested AV noise for every shot; the seed still comes from seed/seed_policy. Leave unconnected to use the built-in noise.",
+                ),
+                io.Sigmas.Input(
+                    "sigmas", optional=True, display_name="调度表",
+                    tooltip="External SIGMAS schedule (full tensor, sigma[0]=max -> sigma[-1]=0). When connected it is used as-is for every pass - refine_denoise no longer truncates. Leave unconnected for the built-in schedule.",
+                ),
+                io.Sampler.Input(
+                    "sampler", optional=True, display_name="采样器",
+                    tooltip="External KSampler-compatible SAMPLER primitive. When connected the model switches to the native FLOW_AV audio-clock mode so standard samplers advance audio correctly. Leave unconnected for the built-in dual-clock euler.",
+                ),
                 io.Latent.Input(
                     "refine_latent", optional=True,
                     tooltip=(
@@ -1540,6 +1571,7 @@ class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):
                 seed=0, seed_policy="increment", cfg=1.0, context_noise=0.0,
                 release_clip=True, free_between_segments=True,
                 sampler_settings=None,
+                noise=None, sigmas=None, sampler=None,
                 refine_latent=None, refine_denoise=0.45, refine_audio="keep"):
         params = {
             "steps": steps, "shift_video": shift_video, "shift_audio": shift_audio,
@@ -1559,6 +1591,7 @@ class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):
             seed=params["seed"], seed_policy=params["seed_policy"], cfg=params["cfg"],
             release_clip=release_clip, free_between_segments=free_between_segments,
             context_noise=params["context_noise"],
+            external_noise=noise, external_sigmas=sigmas, external_sampler=sampler,
             refine_latent=refine_latent, refine_denoise=refine_denoise, refine_audio=refine_audio,
         ))
 

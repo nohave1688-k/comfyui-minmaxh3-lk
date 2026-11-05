@@ -132,6 +132,9 @@
         "name": "二跑去噪强度",
         "tooltip": "截断调度的起始 sigma（= 去噪强度）。0.3–0.5 可锐化放大后的潜空间；1.0 等于完全重采。一跑忽略。"
       },
+      "noise": { "name": "噪声" },
+      "sigmas": { "name": "调度表" },
+      "sampler": { "name": "采样器" },
       "refine_audio": {
         "name": "二跑音频",
         "options": {
