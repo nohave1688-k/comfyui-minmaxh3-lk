@@ -31,9 +31,8 @@ from comfy_api.latest import io
 import comfy.nested_tensor
 import comfy.utils
 
-from .audio_ops import decode_av_latent
 from .conditioning import build_conditioning
-from .core import nested_av_parts, temporal_shape
+from .core import nested_av_parts
 from .sampling import (
     DEFAULT_SAMPLER_NAME,
     DEFAULT_SCHEDULER_NAME,
@@ -903,56 +902,26 @@ def _sample_bundle(model, bundle, *, steps, shift_video, shift_audio,
     return out
 
 
-def _audio_samples(audio, seconds):
-    sample_rate = int(audio.get("sample_rate") or 0)
-    return max(0, int(round(float(seconds) * sample_rate))) if sample_rate else 0
-
-
-def _concat_audio(clips):
-    if not clips:
-        return None
-    sample_rate = int(clips[0].get("sample_rate") or 0)
-    waveforms = []
-    for clip in clips:
-        waveform = clip.get("waveform")
-        if waveform is None:
-            continue
-        if sample_rate and int(clip.get("sample_rate") or sample_rate) != sample_rate:
-            waveform = torchaudio_resample(waveform, int(clip["sample_rate"]), sample_rate)
-        waveforms.append(waveform)
-    if not waveforms:
-        return None
-    return {"waveform": torch.cat(waveforms, dim=-1), "sample_rate": sample_rate}
-
-
-def torchaudio_resample(waveform, source_rate, target_rate):
-    try:
-        import torchaudio
-        return torchaudio.functional.resample(waveform, source_rate, target_rate)
-    except Exception:
-        # Linear fallback keeps the loop alive on installs without torchaudio.
-        ratio = target_rate / float(source_rate)
-        length = max(1, int(round(waveform.shape[-1] * ratio)))
-        indices = torch.linspace(0, waveform.shape[-1] - 1, length).round().long()
-        return waveform[..., indices]
-
-
 def run_long_video(model, segments, *, steps, shift_video, shift_audio,
+                   sampler_name, scheduler, seed, seed_policy, cfg, release_clip,
                    free_between_segments, context_noise=0.0,
+                   video_vae=None, audio_vae=None,
                    external_noise=None, external_sigmas=None, external_sampler=None):
     plan = segments
     if not isinstance(plan, dict) or not plan.get("segments"):
-        raise ValueError("Connect the integrated node's 'segments' output to the long video sampler.")
+        raise ValueError("Connect the storyboard node's 'segments' output to the long video sampler.")
+    # Linked VAEs (from the settings node's 视频/音频 VAE outputs) override the
+    # name-based loading the plan builder performed, so conditioning and any
+    # downstream decode chain see exactly these objects.
+    if video_vae is not None:
+        plan["video_vae"] = video_vae
+    if audio_vae is not None:
+        plan["audio_vae"] = audio_vae
     start = int(plan["range"]["start"]) - 1
     end = int(plan["range"]["end"]) - 1
     latent_continue = bool(plan.get("latent_continue", True))
     lora_cache = _lora_cache()
     clip = plan.get("clip")
-    frames_out = []
-    audio_out = []
-    reports = []
-    infos = []
-    cursor = 0
     preview = plan.get("preview") or {}
     progress = None
     if getattr(comfy.utils, "PROGRESS_BAR_ENABLED", True):
@@ -960,6 +929,7 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
     previous_samples = None
     collected = []
     audio_mode = None
+    first_positive = None
 
     for index in range(start, end + 1):
         segment = plan["segments"][index]
@@ -974,6 +944,10 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
                 plan, index, first_frame_override=None, clip=clip,
                 connected=(plan.get("connected_by_segment") or {}).get(index + 1),
             )
+        if first_positive is None:
+            # The conditioning output for downstream sampler chains: the first
+            # executed shot's positive bundle (prompt + reference encoding).
+            first_positive = bundle["positive"]
 
         if release_clip and clip is not None:
             _release_clip(plan, clip)
@@ -1035,41 +1009,9 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
             "video_mask": None if seg_vmask is None else seg_vmask.detach().to("cpu"),
             "audio_mask": None if seg_amask is None else seg_amask.detach().to("cpu"),
         })
-        frames, audio, _video_latent, _audio_latent = decode_av_latent(
-            samples, plan["video_vae"], plan["audio_vae"]
-        )
+        # No per-segment decode here: the packed AV latent is the node's output
+        # and decoding happens in the downstream AV 解码 node.
         del samples, seg_model
-        frames = frames.detach().to("cpu")
-        if audio is not None and audio.get("waveform") is not None:
-            audio = dict(audio)
-            audio["waveform"] = audio["waveform"].detach().to("cpu")
-
-        if carried:
-            if int(frames.shape[0]) > CARRY_FRAMES:
-                frames = frames[CARRY_FRAMES:]
-            trim_samples = _audio_samples(audio, CARRY_FRAMES / 24.0)
-            if trim_samples and audio.get("waveform") is not None:
-                audio = dict(audio)
-                audio["waveform"] = audio["waveform"][..., trim_samples:]
-
-        infos.append({
-            "segment": index + 1,
-            "seed": seg_seed,
-            "start_frame": cursor if absolute_start is None else absolute_start,
-            "frames": int(frames.shape[0]),
-            "carried_frames": CARRY_FRAMES if carried else 0,
-            "latent_continue": bool(latent_continue),
-            "refined": False,
-            "duration_seconds": int(frames.shape[0]) / 24.0,
-        })
-        frames_out.append(frames)
-        if audio is not None:
-            audio_out.append(audio)
-        cursor += int(frames.shape[0])
-        reports.append(
-            f"[segment {index + 1}] seed={seg_seed} frames={int(frames.shape[0])} "
-            f"carried={CARRY_FRAMES if carried else 0} loras={len(segment.get('loras') or [])}"
-        )
 
         if free_between_segments:
             try:
@@ -1078,27 +1020,10 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
             except Exception:
                 pass
 
-    if not frames_out:
-        raise RuntimeError("Long video sampler produced no frames.")
-    all_frames = torch.cat(frames_out, dim=0)
-    all_audio = _concat_audio(audio_out)
-    last_frame = all_frames[-1:]
+    if not collected:
+        raise RuntimeError("Long video sampler produced no segments.")
     av_latent_out = _assemble_whole_av_latent(collected, audio_mode, latent_continue, start, end)
-    segment_info = json.dumps(
-        {
-            "pass": "first",
-            "range": {"start": start + 1, "end": end + 1},
-            "latent_continue": latent_continue,
-            "context_noise": float(context_noise),
-            "width": int(collected[0]["video"].shape[4]) * 16,
-            "height": int(collected[0]["video"].shape[3]) * 16,
-            "total_frames": int(all_frames.shape[0]),
-            "segments": infos,
-        },
-        ensure_ascii=False,
-        indent=2,
-    )
-    return all_frames, all_audio, last_frame, "\n".join(reports), segment_info, av_latent_out
+    return av_latent_out, first_positive
 
 
 class MiniMaxH3SamplerSettingsGH(io.ComfyNode):
@@ -1159,35 +1084,22 @@ class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):
             display_name="MiniMax-H3 长视频分段采样（LK）",
             category="LK/MiniMax H3 Integration",
             description=(
-                "Runs the integrated node's 1-8 segment plan: per-segment LoRA, "
-                "previous-tail continuation, dual-clock sampling, decode and concatenation."
+                "Runs the storyboard node's 1-8 segment plan: per-segment LoRA, "
+                "previous-tail latent continuation and dual-clock sampling. Outputs "
+                "the whole-video packed AV latent plus the positive conditioning for "
+                "downstream sampler chains (BasicGuider / SamplerCustomAdvanced)."
             ),
             inputs=[
                 io.Model.Input("model"),
                 io.Custom(SEGMENT_TYPE).Input("segments", display_name="segments"),
-                io.Int.Input("steps", default=4, min=1, max=1000, extra_dict={"hidden": True}),
-                io.Float.Input("shift_video", default=12.0, min=0.01, max=100.0, step=0.01, advanced=True, extra_dict={"hidden": True}),
-                io.Float.Input("shift_audio", default=3.0, min=0.01, max=100.0, step=0.01, advanced=True, extra_dict={"hidden": True}),
-                io.Combo.Input("sampler_name", options=SAMPLER_OPTIONS, default=DEFAULT_SAMPLER_NAME, optional=True, extra_dict={"hidden": True}),
-                io.Combo.Input("scheduler", options=SCHEDULER_OPTIONS, default=DEFAULT_SCHEDULER_NAME, optional=True, extra_dict={"hidden": True}),
-                io.Int.Input("seed", default=0, min=0, max=0xFFFFFFFFFFFFFFFF),
-                io.Combo.Input("seed_policy", options=["increment", "fixed"], default="increment"),
-                io.Float.Input(
-                    "context_noise", default=0.0, min=0.0, max=1.0, step=0.05,
-                    extra_dict={"hidden": True},
-                    tooltip=(
-                        "Noise applied to the carried context frames at each seam. "
-                        "0 keeps the previous tail exactly; 0.1-0.3 lets the sampler "
-                        "clean the carried face instead of compounding texture. "
-                        "Audio remains held for speech continuity."
-                    ),
+                io.Vae.Input(
+                    "video_vae", optional=True, display_name="视频 VAE",
+                    tooltip="视频 VAE（从 MiniMaxH3模型设置 节点的 视频 VAE 输出连线）。未连接时按模型设置里的名字加载。",
                 ),
-                io.Float.Input("cfg", default=1.0, min=0.0, max=20.0, step=0.1, advanced=True, extra_dict={"hidden": True}),
-                io.Boolean.Input(
-                    "release_clip", default=True, advanced=True,
-                    tooltip="Unload the H3 text encoder before each segment's sampling and reload it for the next conditioning. Disable only if VRAM allows keeping CLIP and the DiT together.",
+                io.Vae.Input(
+                    "audio_vae", optional=True, display_name="音频 VAE",
+                    tooltip="音频 VAE（从 MiniMaxH3模型设置 节点的 音频 VAE 输出连线）。未连接时按模型设置里的名字加载。",
                 ),
-                io.Boolean.Input("free_between_segments", default=True, advanced=True),
                 io.Custom("LK_H3_SAMPLER_SETTINGS").Input(
                     "sampler_settings", optional=True, display_name="采样设置",
                     tooltip=(
@@ -1202,26 +1114,41 @@ class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):
                 ),
                 io.Sigmas.Input(
                     "sigmas", optional=True, display_name="调度表",
-                    tooltip="External SIGMAS schedule (full tensor, sigma[0]=max -> sigma[-1]=0). When connected it is used as-is for every pass - refine_denoise no longer truncates. Leave unconnected for the built-in schedule.",
+                    tooltip="External SIGMAS schedule (full tensor, sigma[0]=max -> sigma[-1]=0). When connected it is used as-is for every pass. Leave unconnected for the built-in schedule.",
                 ),
                 io.Sampler.Input(
                     "sampler", optional=True, display_name="采样器",
                     tooltip="External KSampler-compatible SAMPLER primitive. When connected the model switches to the native FLOW_AV audio-clock mode so standard samplers advance audio correctly. Leave unconnected for the built-in dual-clock euler.",
                 ),
+                io.Boolean.Input(
+                    "release_clip", default=True, advanced=True,
+                    tooltip="Unload the H3 text encoder before each segment's sampling and reload it for the next conditioning. Disable only if VRAM allows keeping CLIP and the DiT together.",
+                ),
+                io.Boolean.Input("free_between_segments", default=True, advanced=True),
+                # Hidden legacy widgets: still serialize so old workflows keep
+                # their values; the recipe lives in 采样设置 / primitives.
+                io.Int.Input("steps", default=4, min=1, max=1000, extra_dict={"hidden": True}),
+                io.Float.Input("shift_video", default=12.0, min=0.01, max=100.0, step=0.01, extra_dict={"hidden": True}),
+                io.Float.Input("shift_audio", default=3.0, min=0.01, max=100.0, step=0.01, extra_dict={"hidden": True}),
+                io.Combo.Input("sampler_name", options=SAMPLER_OPTIONS, default=DEFAULT_SAMPLER_NAME, optional=True, extra_dict={"hidden": True}),
+                io.Combo.Input("scheduler", options=SCHEDULER_OPTIONS, default=DEFAULT_SCHEDULER_NAME, optional=True, extra_dict={"hidden": True}),
+                io.Int.Input("seed", default=0, min=0, max=0xFFFFFFFFFFFFFFFF, extra_dict={"hidden": True}),
+                io.Combo.Input("seed_policy", options=["increment", "fixed"], default="increment", extra_dict={"hidden": True}),
+                io.Float.Input("context_noise", default=0.0, min=0.0, max=1.0, step=0.05, extra_dict={"hidden": True}),
+                io.Float.Input("cfg", default=1.0, min=0.0, max=20.0, step=0.1, extra_dict={"hidden": True}),
             ],
             outputs=[
-                io.Image.Output("frames", display_name="frames"),
-                io.Audio.Output("audio", display_name="audio"),
-                io.Image.Output("last_frame", display_name="last_frame"),
-                io.String.Output("report", display_name="report"),
-                io.String.Output("segment_info", display_name="segment_info"),
                 io.Latent.Output(
-                    "av_latent", display_name="av_latent",
+                    "av_latent", display_name="AV 潜空间",
                     tooltip=(
                         "Packed AV latent of the executed range with lk_layout metadata. "
-                        "Feed through LKH3AVUpscale for downstream HD / upscale chains "
-                        "second pass."
+                        "Feed through AV潜空间放大 and a downstream sampler chain for the "
+                        "HD second pass, or decode with the AV 解码 node."
                     ),
+                ),
+                io.Conditioning.Output(
+                    "conditioning", display_name="conditioning",
+                    tooltip="First executed shot's positive conditioning — feed into a comfy BasicGuider for downstream second-pass chains.",
                 ),
             ],
         )
@@ -1232,7 +1159,8 @@ class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):
     )
 
     @classmethod
-    def execute(cls, model, segments, steps, shift_video, shift_audio,
+    def execute(cls, model, segments, video_vae=None, audio_vae=None,
+                steps=4, shift_video=12.0, shift_audio=3.0,
                 sampler_name=DEFAULT_SAMPLER_NAME, scheduler=DEFAULT_SCHEDULER_NAME,
                 seed=0, seed_policy="increment", cfg=1.0, context_noise=0.0,
                 release_clip=True, free_between_segments=True,
@@ -1256,6 +1184,7 @@ class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):
             seed=params["seed"], seed_policy=params["seed_policy"], cfg=params["cfg"],
             release_clip=release_clip, free_between_segments=free_between_segments,
             context_noise=params["context_noise"],
+            video_vae=video_vae, audio_vae=audio_vae,
             external_noise=noise, external_sigmas=sigmas, external_sampler=sampler,
         ))
 

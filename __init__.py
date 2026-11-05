@@ -8,18 +8,23 @@ merge) that keeps only the long-video core:
   references, RefMod rows, per-segment LoRA slots, and connectable media
   sockets: drag upstream links onto the panel buttons).
 * ``LKH3LongVideo`` — the segmented sampler: per-segment LoRA, latent
-  continuation across seams, dual-clock sampling, joint AV decode.  It also
-  outputs the whole-video packed AV latent and, via its optional
-  ``refine_latent`` input, runs the HD second pass over an upscaled latent.
+  continuation across seams, dual-clock sampling.  It outputs the whole-video
+  packed AV latent plus the positive conditioning; decoding and HD second
+  passes are composed downstream from standard sampling primitives.
 * ``LKH3AVUpscale`` — spatially upscales the video part of the packed AV
-  latent (audio/layout pass through) for the HD second-pass chain.
+  latent (audio/layout pass through, per-shot chunks to bound VRAM) for the
+  HD second-pass chain.
+* ``LKH3DualClockSampler`` — the T8-style sampler contract: patches the model
+  with the AV dual-clock / FLOW_AV model sampling and emits MODEL / SAMPLER /
+  SIGMAS for comfy-core BasicGuider + SamplerCustomAdvanced chains.
+* ``LKH3AVDecode`` — decodes the packed AV latent back to frames + audio.
 
 Removed from the lanxi pack during the rebuild: the single-mode pipeline
 (adapter + standalone dual-clock sampler + AV decode), the V1 dual-track node
 registration and the 16 never-registered RefMod graph nodes (the RefMod
 *library* remains as the panel's backing store under ``models/refmods/``).
 
-Registered purely through ``NODE_CLASS_MAPPINGS``; the three classes are V3
+Registered purely through ``NODE_CLASS_MAPPINGS``; the classes are V3
 ``io.ComfyNode`` implementations that ComfyUI executes natively.
 """
 
@@ -30,6 +35,8 @@ WEB_DIRECTORY = "./web"
 from .gh import nodes as _gh_nodes
 from .gh import long_video as _gh_long_video
 from .gh import latent_upscale as _gh_latent_upscale
+from .gh import sampling as _gh_sampling
+from .gh import audio_ops as _gh_audio_ops
 from .gh import prompt_optimizer as _gh_prompt_optimizer  # noqa: F401  (registers prompt-optimizer routes)
 
 NODE_CLASS_MAPPINGS = {
@@ -40,6 +47,8 @@ NODE_CLASS_MAPPINGS = {
     "LKH3SamplerSettings": _gh_long_video.MiniMaxH3SamplerSettingsGH,
     "LKH3LongVideo": _gh_long_video.MiniMaxH3LongVideoRunnerGH,
     "LKH3AVUpscale": _gh_latent_upscale.MiniMaxH3AVUpscaleGH,
+    "LKH3DualClockSampler": _gh_sampling.MiniMaxH3DualClockSamplerGH,
+    "LKH3AVDecode": _gh_audio_ops.MiniMaxH3AVDecodeGH,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -50,6 +59,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LKH3SamplerSettings": "MiniMaxH3采样设置（LK）",
     "LKH3LongVideo": "MiniMax-H3 长视频分段采样（LK）",
     "LKH3AVUpscale": "MiniMax-H3 AV潜空间放大（LK）",
+    "LKH3DualClockSampler": "MiniMax-H3 双钟采样（LK）",
+    "LKH3AVDecode": "MiniMax-H3 AV解码（LK）",
 }
 
 # LoRA list for the per-segment LoRA slots.  ``folder_paths`` is resolved at

@@ -603,12 +603,25 @@ class MiniMaxH3SettingsGH(io.ComfyNode):
                     display_name="模型设置",
                     tooltip="Connect to the MiniMaxH3分镜编排 node's settings input",
                 ),
+                io.Vae.Output(
+                    "video_vae", display_name="视频 VAE",
+                    tooltip="Selected video VAE as a link — feed the long-video sampler's 视频 VAE input or the AV 解码 node.",
+                ),
+                io.Vae.Output(
+                    "audio_vae", display_name="音频 VAE",
+                    tooltip="Selected audio VAE as a link — feed the long-video sampler's 音频 VAE input or the AV 解码 node.",
+                ),
             ],
         )
 
     @classmethod
     def execute(cls, clip_name, video_vae_name, audio_vae_name, aspect, megapixels,
                 ref_image_size, audio_mode):
+        # VAELoader caches by name, so these are the same objects the plan
+        # builder / sampler would load — linking them just makes the wiring
+        # explicit and lets downstream decode nodes reuse them.
+        video_vae = nodes.VAELoader().load_vae(video_vae_name)[0] if video_vae_name else None
+        audio_vae = nodes.VAELoader().load_vae(audio_vae_name)[0] if audio_vae_name else None
         return io.NodeOutput({
             "clip_name": clip_name,
             "video_vae_name": video_vae_name,
@@ -617,7 +630,7 @@ class MiniMaxH3SettingsGH(io.ComfyNode):
             "megapixels": megapixels,
             "ref_image_size": ref_image_size,
             "audio_mode": audio_mode,
-        })
+        }, video_vae, audio_vae)
 
 
 class MiniMaxH3ShotsGH(io.ComfyNode):

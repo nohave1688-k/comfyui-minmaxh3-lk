@@ -12,6 +12,7 @@ import comfy.samplers
 import comfy.utils
 import comfy.model_management as model_management
 from comfy.ldm.minimax import model as minimax_model
+from comfy_api.latest import io
 from comfy.k_diffusion.sampling import to_d
 
 from .core import nested_av_parts
@@ -572,3 +573,65 @@ def setup_dual_clock_sampling_gh(
 
     sigmas = _scheduler_sigmas(model_sampling, scheduler, steps, shift_video)
     return patched_model, sampler, sigmas
+
+
+class MiniMaxH3DualClockSamplerGH(io.ComfyNode):
+    """T8-style sampler contract: emits the standard MODEL / SAMPLER / SIGMAS
+    triple so downstream chains can use comfy-core BasicGuider +
+    SamplerCustomAdvanced (the RandomNoise/GUIDER/SAMPLER/SIGMAS composition)
+    on the packed AV latent.
+
+    ``dual_clock_euler`` keeps the built-in dual-clock euler; any standard
+    sampler name switches the model patch to the native FLOW_AV audio-clock
+    mode so that sampler advances audio tokens correctly.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LKH3DualClockSampler",
+            display_name="MiniMax-H3 双钟采样（LK）",
+            category="LK/MiniMax H3 Integration",
+            description=(
+                "Patches the model with the MiniMax H3 AV dual-clock model sampling "
+                "and emits MODEL / SAMPLER / SIGMAS for BasicGuider + "
+                "SamplerCustomAdvanced chains (HD second pass)."
+            ),
+            inputs=[
+                io.Model.Input("model"),
+                io.Latent.Input(
+                    "av_latent",
+                    tooltip="嵌套 AV 潜空间（决定布局/关键帧补丁与音频钟校验）。接长视频采样输出的 av_latent，或放大后的二跑潜空间。",
+                ),
+                io.Int.Input("steps", default=4, min=1, max=1000),
+                io.Float.Input("shift_video", default=12.0, min=0.01, max=100.0, step=0.01),
+                io.Float.Input("shift_audio", default=3.0, min=0.01, max=100.0, step=0.01),
+                io.Combo.Input("sampler_name", options=SAMPLER_OPTIONS, default=DEFAULT_SAMPLER_NAME),
+                io.Combo.Input("scheduler", options=SCHEDULER_OPTIONS, default=DEFAULT_SCHEDULER_NAME),
+            ],
+            outputs=[
+                io.Model.Output(
+                    "model", display_name="model",
+                    tooltip="打上 AV 双钟/FLOW_AV 采样补丁的模型 — 接 comfy-core BasicGuider 的 model 输入。",
+                ),
+                io.Sampler.Output(
+                    "sampler", display_name="sampler",
+                    tooltip="标准 SAMPLER 原语 — 接 SamplerCustomAdvanced 的 sampler 输入。",
+                ),
+                io.Sigmas.Output(
+                    "sigmas", display_name="sigmas",
+                    tooltip="完整调度表（sigma[0]=max -> sigma[-1]=0）— 接 SamplerCustomAdvanced 的 sigmas 输入。",
+                ),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, model, av_latent, steps, shift_video, shift_audio,
+                sampler_name, scheduler):
+        patched_model, sampler, sigmas = setup_dual_clock_sampling_gh(
+            model, av_latent,
+            int(steps), float(shift_video), float(shift_audio),
+            sampler_name or DEFAULT_SAMPLER_NAME,
+            scheduler or DEFAULT_SCHEDULER_NAME,
+        )
+        return io.NodeOutput(patched_model, sampler, sigmas)

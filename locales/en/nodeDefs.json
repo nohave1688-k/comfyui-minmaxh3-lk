@@ -141,34 +141,34 @@
         "name": "Context noise"
       },
       "noise": {
-        "name": "noise"
+        "name": "Noise"
       },
       "sigmas": {
-        "name": "sigmas"
+        "name": "Sigmas"
       },
       "sampler": {
-        "name": "sampler"
+        "name": "Sampler"
+      },
+      "video_vae": {
+        "name": "Video VAE",
+        "tooltip": "Video VAE (link from the MiniMaxH3模型设置 node's 视频 VAE output). Falls back to the name picked in the settings when unconnected."
+      },
+      "audio_vae": {
+        "name": "Audio VAE",
+        "tooltip": "Audio VAE (link from the MiniMaxH3模型设置 node's 音频 VAE output). Falls back to the name picked in the settings when unconnected."
+      },
+      "sampler_settings": {
+        "name": "Sampler Settings"
       }
     },
     "outputs": {
       "0": {
-        "name": "frames"
+        "name": "AV Latent",
+        "tooltip": "Whole-video packed AV latent with lk_layout metadata. Chain through AV潜空间放大 + a downstream sampler chain for the HD second pass, or decode with the AV 解码 node."
       },
       "1": {
-        "name": "audio"
-      },
-      "2": {
-        "name": "last_frame"
-      },
-      "3": {
-        "name": "report"
-      },
-      "4": {
-        "name": "segment_info"
-      },
-      "5": {
-        "name": "av_latent",
-        "tooltip": "Packed AV latent of the executed range with lk_layout metadata. Feed through LKH3AVUpscale and back into refine_latent for the HD second pass."
+        "name": "conditioning",
+        "tooltip": "First executed shot's positive conditioning — feed into a comfy BasicGuider for downstream second-pass chains."
       }
     }
   },
@@ -194,12 +194,16 @@
       "scale_by": {
         "name": "scale by",
         "tooltip": "Spatial scale factor. The default 2.0 takes the 0.5MP base canvas to the H3 trained maximum (~1920x1088). The second pass costs roughly scale^2 more compute per token than the first pass."
+      },
+      "upscale_in_segments": {
+        "name": "Upscale in segments",
+        "tooltip": "Upscale one layout segment (per shot) at a time to bound the VRAM peak on long videos. Chunks are temporal, non-overlapping and the interpolation is frame-local, so the assembled result is identical to a whole-tensor upscale."
       }
     },
     "outputs": {
       "0": {
         "name": "av_latent",
-        "tooltip": "Upscaled packed AV latent; connect to the long video sampler's refine_latent."
+        "tooltip": "Upscaled packed AV latent; feed the downstream HD sampler chain (双钟采样 + BasicGuider + SamplerCustomAdvanced)."
       }
     }
   },
@@ -210,6 +214,14 @@
       "0": {
         "name": "settings",
         "tooltip": "Connect to the MiniMaxH3 Shot Storyboard node's settings input."
+      },
+      "1": {
+        "name": "Video VAE",
+        "tooltip": "Selected video VAE as a link — feed the long-video sampler's 视频 VAE input or the AV 解码 node."
+      },
+      "2": {
+        "name": "Audio VAE",
+        "tooltip": "Selected audio VAE as a link — feed the long-video sampler's 音频 VAE input or the AV 解码 node."
       }
     }
   },
@@ -315,6 +327,84 @@
       "0": {
         "name": "segments",
         "tooltip": "Long-video segment plan; connect to the long video sampler."
+      }
+    }
+  },
+  "LKH3DualClockSampler": {
+    "display_name": "MiniMax-H3 Dual-Clock Sampler (LK)",
+    "description": "Patches the model with the MiniMax H3 AV dual-clock model sampling and emits MODEL / SAMPLER / SIGMAS for comfy-core BasicGuider + SamplerCustomAdvanced chains (T8 style).",
+    "inputs": {
+      "model": {
+        "name": "Model"
+      },
+      "av_latent": {
+        "name": "AV Latent",
+        "tooltip": "Nested AV latent the contract is built for (layout/keyframe patches and the audio clock check). Feed the long-video sampler's av_latent or the upscaled second-pass latent."
+      },
+      "steps": {
+        "name": "steps"
+      },
+      "shift_video": {
+        "name": "shift_video"
+      },
+      "shift_audio": {
+        "name": "shift_audio"
+      },
+      "sampler_name": {
+        "name": "sampler"
+      },
+      "scheduler": {
+        "name": "scheduler"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "model",
+        "tooltip": "Model patched with the AV dual-clock / FLOW_AV sampling — feed a comfy-core BasicGuider's model input."
+      },
+      "1": {
+        "name": "sampler",
+        "tooltip": "Standard SAMPLER primitive — feed SamplerCustomAdvanced's sampler input."
+      },
+      "2": {
+        "name": "sigmas",
+        "tooltip": "Full schedule (sigma[0]=max -> sigma[-1]=0) — feed SamplerCustomAdvanced's sigmas input."
+      }
+    }
+  },
+  "LKH3AVDecode": {
+    "display_name": "MiniMax-H3 AV Decode (LK)",
+    "description": "Decodes the packed AV latent into frames and audio; also exposes the split video/audio latent halves for custom downstream chains.",
+    "inputs": {
+      "av_latent": {
+        "name": "AV Latent",
+        "tooltip": "Nested AV latent from the long-video sampler (or a downstream sampler chain)."
+      },
+      "video_vae": {
+        "name": "Video VAE",
+        "tooltip": "Video VAE (link from the MiniMaxH3模型设置 node)."
+      },
+      "audio_vae": {
+        "name": "Audio VAE",
+        "tooltip": "Audio VAE (link from the MiniMaxH3模型设置 node)."
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "Frames",
+        "tooltip": "All decoded frames (one IMAGE per frame)."
+      },
+      "1": {
+        "name": "Audio",
+        "tooltip": "The decoded full audio."
+      },
+      "2": {
+        "name": "Video Latent",
+        "tooltip": "Video half of the latent (with layout metadata)."
+      },
+      "3": {
+        "name": "Audio Latent",
+        "tooltip": "Audio half of the latent."
       }
     }
   }

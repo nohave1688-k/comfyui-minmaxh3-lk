@@ -59,12 +59,24 @@
     "display_name": "MiniMaxH3采样设置（LK）",
     "description": "长视频采样器的采样参数；输出连接到长视频采样节点的 采样设置 输入，覆盖其面板默认值。",
     "inputs": {
-      "steps": { "name": "步数" },
-      "shift_video": { "name": "视频偏移" },
-      "shift_audio": { "name": "音频偏移" },
-      "sampler_name": { "name": "采样器" },
-      "scheduler": { "name": "调度器" },
-      "seed": { "name": "种子" },
+      "steps": {
+        "name": "步数"
+      },
+      "shift_video": {
+        "name": "视频偏移"
+      },
+      "shift_audio": {
+        "name": "音频偏移"
+      },
+      "sampler_name": {
+        "name": "采样器"
+      },
+      "scheduler": {
+        "name": "调度器"
+      },
+      "seed": {
+        "name": "种子"
+      },
       "seed_policy": {
         "name": "种子策略",
         "options": {
@@ -72,8 +84,12 @@
           "fixed": "固定"
         }
       },
-      "context_noise": { "name": "上下文噪声" },
-      "cfg": { "name": "CFG" }
+      "context_noise": {
+        "name": "上下文噪声"
+      },
+      "cfg": {
+        "name": "CFG"
+      }
     },
     "outputs": {
       "0": {
@@ -124,29 +140,35 @@
       "context_noise": {
         "name": "Context noise"
       },
-      "noise": { "name": "噪声" },
-      "sigmas": { "name": "调度表" },
-      "sampler": { "name": "采样器" }
+      "noise": {
+        "name": "噪声"
+      },
+      "sigmas": {
+        "name": "调度表"
+      },
+      "sampler": {
+        "name": "采样器"
+      },
+      "video_vae": {
+        "name": "视频 VAE",
+        "tooltip": "视频 VAE（从 MiniMaxH3模型设置 节点的 视频 VAE 输出连线）。未连接时按模型设置里的名字加载。"
+      },
+      "audio_vae": {
+        "name": "音频 VAE",
+        "tooltip": "音频 VAE（从 MiniMaxH3模型设置 节点的 音频 VAE 输出连线）。未连接时按模型设置里的名字加载。"
+      },
+      "sampler_settings": {
+        "name": "采样设置"
+      }
     },
     "outputs": {
       "0": {
-        "name": "图像"
+        "name": "AV 潜空间",
+        "tooltip": "执行范围的全片打包 AV 潜空间（含 lk_layout 布局元数据）。接 AV潜空间放大 后走下游采样链做高清二跑，或接 AV解码 出图。"
       },
       "1": {
-        "name": "音频"
-      },
-      "2": {
-        "name": "尾帧"
-      },
-      "3": {
-        "name": "报告"
-      },
-      "4": {
-        "name": "分段信息"
-      },
-      "5": {
-        "name": "AV 潜空间",
-        "tooltip": "执行范围的全片打包 AV 潜空间（含 lk_layout 布局元数据）。接 AV潜空间放大 后回灌 refine_latent 做高清二跑。"
+        "name": "conditioning",
+        "tooltip": "首镜的正向条件（提示词+参考编码）— 接 comfy 核心 BasicGuider 的 conditioning 输入，供下游二采链使用。"
       }
     }
   },
@@ -172,12 +194,16 @@
       "scale_by": {
         "name": "放大倍数",
         "tooltip": "空间放大倍数。默认 2.0 把 0.5MP 基础画布带到 H3 训练上限（约 1920×1088）。二跑每段算力约为倍数的平方。"
+      },
+      "upscale_in_segments": {
+        "name": "逐镜分段放大",
+        "tooltip": "一次只在显存里放一个镜头的时间片，长视频显存峰值不随镜头数上涨。时间片互不重叠、空间插值逐帧独立，拼回的结果与整条张量放大完全一致。"
       }
     },
     "outputs": {
       "0": {
         "name": "AV 潜空间",
-        "tooltip": "放大后的打包 AV 潜空间；接长视频采样节点的 refine_latent。"
+        "tooltip": "放大后的打包 AV 潜空间 — 接下游高清采样链（双钟采样 + BasicGuider + SamplerCustomAdvanced）。"
       }
     }
   },
@@ -185,9 +211,15 @@
     "display_name": "MiniMaxH3模型设置（LK)",
     "description": "全局模型与画布设置；输出连接到分镜编排节点的模型设置输入。",
     "inputs": {
-      "clip_name": { "name": "CLIP模型" },
-      "video_vae_name": { "name": "视频 VAE" },
-      "audio_vae_name": { "name": "音频 VAE" },
+      "clip_name": {
+        "name": "CLIP模型"
+      },
+      "video_vae_name": {
+        "name": "视频 VAE"
+      },
+      "audio_vae_name": {
+        "name": "音频 VAE"
+      },
       "aspect": {
         "name": "宽高比例",
         "options": {
@@ -202,7 +234,9 @@
           "21:9": "21:9"
         }
       },
-      "megapixels": { "name": "百万像素" },
+      "megapixels": {
+        "name": "百万像素"
+      },
       "ref_image_size": {
         "name": "参考素材尺寸",
         "options": {
@@ -226,6 +260,14 @@
       "0": {
         "name": "模型设置",
         "tooltip": "连接到 MiniMaxH3分镜编排 节点的模型设置输入。"
+      },
+      "1": {
+        "name": "视频 VAE",
+        "tooltip": "所选视频 VAE 连线输出 — 接长视频分段的 视频 VAE 或 AV解码 节点。"
+      },
+      "2": {
+        "name": "音频 VAE",
+        "tooltip": "所选音频 VAE 连线输出 — 接长视频分段的 音频 VAE 或 AV解码 节点。"
       }
     }
   },
@@ -233,21 +275,51 @@
     "display_name": "MiniMaxH3分镜（LK)",
     "description": "长视频的单个分镜：时长、提示词、首尾帧与参考素材连线插座；输出接 MiniMaxH3分镜合成 节点。",
     "inputs": {
-      "duration": { "name": "时长（秒）" },
-      "prompt": { "name": "提示词" },
-      "first_frame": { "name": "首帧" },
-      "last_frame": { "name": "尾帧" },
-      "ref_image_1": { "name": "图片 1" },
-      "ref_image_2": { "name": "图片 2" },
-      "ref_image_3": { "name": "图片 3" },
-      "ref_image_4": { "name": "图片 4" },
-      "ref_image_5": { "name": "图片 5" },
-      "ref_image_6": { "name": "图片 6" },
-      "ref_video_1": { "name": "视频 1" },
-      "ref_video_2": { "name": "视频 2" },
-      "ref_audio_1": { "name": "音频 1" },
-      "ref_audio_2": { "name": "音频 2" },
-      "ref_audio_3": { "name": "音频 3" }
+      "duration": {
+        "name": "时长（秒）"
+      },
+      "prompt": {
+        "name": "提示词"
+      },
+      "first_frame": {
+        "name": "首帧"
+      },
+      "last_frame": {
+        "name": "尾帧"
+      },
+      "ref_image_1": {
+        "name": "图片 1"
+      },
+      "ref_image_2": {
+        "name": "图片 2"
+      },
+      "ref_image_3": {
+        "name": "图片 3"
+      },
+      "ref_image_4": {
+        "name": "图片 4"
+      },
+      "ref_image_5": {
+        "name": "图片 5"
+      },
+      "ref_image_6": {
+        "name": "图片 6"
+      },
+      "ref_video_1": {
+        "name": "视频 1"
+      },
+      "ref_video_2": {
+        "name": "视频 2"
+      },
+      "ref_audio_1": {
+        "name": "音频 1"
+      },
+      "ref_audio_2": {
+        "name": "音频 2"
+      },
+      "ref_audio_3": {
+        "name": "音频 3"
+      }
     },
     "outputs": {
       "0": {
@@ -260,23 +332,125 @@
     "display_name": "MiniMaxH3分镜合成（LK)",
     "description": "按连接顺序收集 MiniMaxH3分镜 节点，与模型设置一起组成长视频分镜计划，输出接长视频采样节点。",
     "inputs": {
-      "settings": { "name": "模型设置" },
-      "latent_continue": { "name": "潜空间续接" },
-      "range_start": { "name": "运行范围·起" },
-      "range_end": { "name": "运行范围·止" },
-      "shot_1": { "name": "分镜 1" },
-      "shot_2": { "name": "分镜 2" },
-      "shot_3": { "name": "分镜 3" },
-      "shot_4": { "name": "分镜 4" },
-      "shot_5": { "name": "分镜 5" },
-      "shot_6": { "name": "分镜 6" },
-      "shot_7": { "name": "分镜 7" },
-      "shot_8": { "name": "分镜 8" }
+      "settings": {
+        "name": "模型设置"
+      },
+      "latent_continue": {
+        "name": "潜空间续接"
+      },
+      "range_start": {
+        "name": "运行范围·起"
+      },
+      "range_end": {
+        "name": "运行范围·止"
+      },
+      "shot_1": {
+        "name": "分镜 1"
+      },
+      "shot_2": {
+        "name": "分镜 2"
+      },
+      "shot_3": {
+        "name": "分镜 3"
+      },
+      "shot_4": {
+        "name": "分镜 4"
+      },
+      "shot_5": {
+        "name": "分镜 5"
+      },
+      "shot_6": {
+        "name": "分镜 6"
+      },
+      "shot_7": {
+        "name": "分镜 7"
+      },
+      "shot_8": {
+        "name": "分镜 8"
+      }
     },
     "outputs": {
       "0": {
         "name": "segments",
         "tooltip": "长视频分镜计划；接长视频采样节点。"
+      }
+    }
+  },
+  "LKH3DualClockSampler": {
+    "display_name": "MiniMax-H3 双钟采样（LK）",
+    "description": "给模型打上 AV 双钟/FLOW_AV 采样补丁，输出标准 MODEL/SAMPLER/SIGMAS 三件套，供 comfy 核心 BasicGuider + SamplerCustomAdvanced 组链（T8 写法）。",
+    "inputs": {
+      "model": {
+        "name": "模型"
+      },
+      "av_latent": {
+        "name": "AV 潜空间",
+        "tooltip": "嵌套 AV 潜空间（决定布局/关键帧补丁与音频钟校验）。接长视频采样输出的 av_latent，或放大后的二跑潜空间。"
+      },
+      "steps": {
+        "name": "步数"
+      },
+      "shift_video": {
+        "name": "视频偏移"
+      },
+      "shift_audio": {
+        "name": "音频偏移"
+      },
+      "sampler_name": {
+        "name": "采样器"
+      },
+      "scheduler": {
+        "name": "调度器"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "model",
+        "tooltip": "打上 AV 双钟/FLOW_AV 采样补丁的模型 — 接 comfy 核心 BasicGuider 的 model 输入。"
+      },
+      "1": {
+        "name": "sampler",
+        "tooltip": "标准 SAMPLER 原语 — 接 SamplerCustomAdvanced 的 sampler 输入。"
+      },
+      "2": {
+        "name": "sigmas",
+        "tooltip": "完整调度表（sigma[0]=max → sigma[-1]=0）— 接 SamplerCustomAdvanced 的 sigmas 输入。"
+      }
+    }
+  },
+  "LKH3AVDecode": {
+    "display_name": "MiniMax-H3 AV解码（LK）",
+    "description": "把打包 AV 潜空间解码回帧与音频；同时给出视频/音频半边潜空间供自定义下游链。",
+    "inputs": {
+      "av_latent": {
+        "name": "AV 潜空间",
+        "tooltip": "长视频分段采样（或下游采样链）输出的嵌套 AV 潜空间。"
+      },
+      "video_vae": {
+        "name": "视频 VAE",
+        "tooltip": "视频 VAE（从 MiniMaxH3模型设置 节点连线）。"
+      },
+      "audio_vae": {
+        "name": "音频 VAE",
+        "tooltip": "音频 VAE（从 MiniMaxH3模型设置 节点连线）。"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "图像",
+        "tooltip": "解码后的全部帧（1 帧 = 1 张图）。"
+      },
+      "1": {
+        "name": "音频",
+        "tooltip": "解码后的整段音频。"
+      },
+      "2": {
+        "name": "视频潜空间",
+        "tooltip": "仅视频半边的潜空间（含布局元数据）。"
+      },
+      "3": {
+        "name": "音频潜空间",
+        "tooltip": "仅音频半边的潜空间。"
       }
     }
   }

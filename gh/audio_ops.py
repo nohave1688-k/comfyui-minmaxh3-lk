@@ -8,6 +8,7 @@ import torch.nn.functional as torch_functional
 import torchaudio
 
 from comfy import model_management
+from comfy_api.latest import io
 from comfy_extras.nodes_audio import vae_decode_audio
 
 from .core import encode_audio_once, nested_av_parts, replace_audio_latent, validate_audio
@@ -244,3 +245,67 @@ def trim_av_output(frames: torch.Tensor, start_seconds: float, duration_seconds:
         indent=2,
     )
     return trimmed_frames, trimmed_audio, report
+
+
+class MiniMaxH3AVDecodeGH(io.ComfyNode):
+    """Decodes the packed AV latent back to frames + audio.
+
+    The downstream half of the sampler's output contract: the long-video
+    sampler no longer decodes internally, so chain this node wherever frames /
+    audio are actually needed (one decode per consumption point).
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LKH3AVDecode",
+            display_name="MiniMax-H3 AV解码（LK）",
+            category="LK/MiniMax H3 Integration",
+            description=(
+                "Decodes the packed AV latent into frames and audio; also exposes "
+                "the split video/audio latent halves for custom downstream chains."
+            ),
+            inputs=[
+                io.Latent.Input(
+                    "av_latent",
+                    tooltip="长视频分段采样（或下游采样链）输出的嵌套 AV 潜空间。",
+                ),
+                io.Vae.Input(
+                    "video_vae",
+                    tooltip="视频 VAE（从 MiniMaxH3模型设置 节点连线）。",
+                ),
+                io.Vae.Input(
+                    "audio_vae",
+                    tooltip="音频 VAE（从 MiniMaxH3模型设置 节点连线）。",
+                ),
+            ],
+            outputs=[
+                io.Image.Output(
+                    "frames", display_name="图像",
+                    tooltip="解码后的全部帧（1 帧 = 1 张图）。",
+                ),
+                io.Audio.Output(
+                    "audio", display_name="音频",
+                    tooltip="解码后的整段音频。",
+                ),
+                io.Latent.Output(
+                    "video_latent", display_name="视频潜空间",
+                    tooltip="仅视频半边的潜空间（含布局元数据）。",
+                ),
+                io.Latent.Output(
+                    "audio_latent", display_name="音频潜空间",
+                    tooltip="仅音频半边的潜空间。",
+                ),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, av_latent, video_vae, audio_vae):
+        frames, audio, video_latent, audio_latent = decode_av_latent(
+            av_latent, video_vae, audio_vae
+        )
+        frames = frames.detach().to("cpu")
+        if audio is not None and audio.get("waveform") is not None:
+            audio = dict(audio)
+            audio["waveform"] = audio["waveform"].detach().to("cpu")
+        return io.NodeOutput(frames, audio, video_latent, audio_latent)
