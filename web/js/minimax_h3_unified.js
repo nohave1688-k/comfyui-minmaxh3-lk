@@ -15,6 +15,7 @@ const NODE = "LKH3Studio";
 const RH_NODE_IDS = [
     NODE,
     "LKH3Settings",
+    "LKH3Shot",
     "LKH3Shots",
 ];
 const WIDTH = 500;
@@ -1639,986 +1640,257 @@ function createPanel(node) {
     return true;
 }
 
-// ── MiniMaxH3分镜编排 (LKH3Shots) ────────────────────────────────────────────
+// ── MiniMaxH3分镜 (LKH3Shot) ─────────────────────────────────────────────────
 // Eight fixed shot blocks; global model/canvas settings arrive from the
 // MiniMaxH3模型设置 node through the settings link, so this node has no
 // settings widgets of its own. Run range + latent continuation are plain
 // schema widgets on the node and act as the per-block on/off switch: blocks
 // outside the range collapse to their dimmed chips header (data preserved).
-function createShotsPanel(node) {
-    const stateKey = "gh_h3_shots_state";
+// ── MiniMaxH3分镜 (LKH3Shot) ─────────────────────────────────────────────────
+// One compact shot node: duration/prompt/media live on the schema (sockets for
+// media), while per-shot LoRA and RefMod rows are managed here through the
+// hidden shot_json widget.
+function createShotPanel(node) {
+    const shotJsonW = widget(node, "shot_json");
+    // The frontend's widget-store restore can lose hidden-widget payloads on
+    // round trips, so the panel also mirrors its state into node.properties
+    // (which always survive serialization) and prefers them on restore.
+    const stateKey = "gh_h3_shot_state";
     node.properties = node.properties || {};
 
-    let restoringState = true;
+    let loras = [];
+    let mods = [];
+    let loras_fetched = null;
+    let loras_fetching = false;
+    let refmod_library = null;
+    let restoring = true;
     let restoreEpoch = 0;
-    let segmentPersistTimer = null;
-    let segmentLoras = null;
-    let segmentLorasLoading = false;
+    let syncTimer = null;
+    const shotWidgets = [];
 
-    const segmentsWidget = widget(node, "segments_json");
-
-    // ── segment data model (same contract as the studio panel) ──────────────
-    const segmentClone = value => JSON.parse(JSON.stringify(value));
-    const defaultSegment = (duration = 5) => ({
-        duration: Math.max(2, Math.min(30, Math.round(Number(duration) || 5))),
-        prompt: "", first_frame: "", last_frame: "", images: [], videos: [], audios: [], mods: [], loras: [],
-    });
-    const normalizeSegment = raw => {
-        const segment = defaultSegment(raw?.duration);
-        segment.prompt = String(raw?.prompt ?? "");
-        segment.first_frame = String(raw?.first_frame ?? "");
-        segment.last_frame = String(raw?.last_frame ?? "");
-        segment.images = (Array.isArray(raw?.images) ? raw.images : [])
-            .map(item => String(item || "").trim()).filter(Boolean).slice(0, MAX_SEG_IMAGES);
-        segment.videos = (Array.isArray(raw?.videos) ? raw.videos : [])
-            .map(item => (typeof item === "string" ? { name: item, muted: false } : { name: String(item?.name || ""), muted: !!item?.muted }))
-            .filter(item => item.name).slice(0, MAX_SEG_VIDEOS);
-        segment.audios = (Array.isArray(raw?.audios) ? raw.audios : [])
-            .map(item => (typeof item === "string" ? { name: item, trimStart: 0, trimEnd: null } : {
-                name: String(item?.name || ""),
-                trimStart: Math.max(0, Number(item?.trimStart) || 0),
-                trimEnd: item?.trimEnd == null ? null : Number(item.trimEnd),
-            }))
-            .filter(item => item.name).slice(0, MAX_SEG_AUDIOS);
-        segment.mods = (Array.isArray(raw?.mods) ? raw.mods : [])
-            .map(item => (typeof item === "string" ? { name: item, strength: 1, count: 1 } : {
-                name: String(item?.name || ""),
-                strength: Math.max(0.05, Math.min(1, Number(item?.strength) || 1)),
-                count: Math.max(1, Math.min(256, Math.round(Number(item?.count) || 1))),
-            }))
-            .filter(item => item.name && item.name !== "(none)" && item.name !== "None").slice(0, MAX_SEG_MODS);
-        segment.loras = (Array.isArray(raw?.loras) ? raw.loras : [])
-            .map(item => (typeof item === "string" ? { name: item, strength_model: 1 } : {
-                name: String(item?.name || ""),
-                strength_model: Math.max(-10, Math.min(10, Number(item?.strength_model) || 1)),
-            }))
-            .filter(item => item.name && item.name !== "(none)" && item.name !== "None").slice(0, MAX_SEG_LORAS);
-        return segment;
-    };
-    const clampRange = value => Math.max(1, Math.min(MAX_SEGMENTS, Math.round(Number(value) || 1)));
-    let segments = (Array.isArray(savedShotsState()?.segments) ? savedShotsState().segments : []);
-    let segmentRange = { start: 1, end: 1 };
-    let latentContinue = true;
-
-    function savedShotsState() {
-        try { return JSON.parse(segmentsWidget?.value || "{}"); } catch { return {}; }
-    }
-    function syncFromSchemaWidgets() {
-        // The run range / latent toggle live on the node schema; keep the
-        // panel closures in step with them.
-        const startW = widget(node, "range_start");
-        const endW = widget(node, "range_end");
-        const latentW = widget(node, "latent_continue");
-        segmentRange.start = clampRange(startW?.value);
-        segmentRange.end = clampRange(endW?.value);
-        if (segmentRange.start > segmentRange.end) [segmentRange.start, segmentRange.end] = [segmentRange.end, segmentRange.start];
-        latentContinue = latentW?.value !== false;
-    }
-    ensureEightSegments();
-    function ensureEightSegments() {
-        while (segments.length < MAX_SEGMENTS) segments.push(defaultSegment(5));
-        segments.length = MAX_SEGMENTS;
-    }
-    function syncSegmentsWidget() {
-        if (!segmentsWidget) return;
-        segmentsWidget.value = JSON.stringify({
-            version: 1,
-            segments: segments.map(item => segmentClone(item)),
-            range: { ...segmentRange },
-            latent_continue: latentContinue,
-        });
-    }
-    function scheduleSegmentSync() {
-        clearTimeout(segmentPersistTimer);
-        segmentPersistTimer = setTimeout(() => {
-            syncSegmentsWidget();
-        }, 250);
-    }
-
-    // ── tag numbering (matches the backend's dense numbering) ───────────────
-    const segmentModTags = seg => (seg.mods || []).reduce((total, item) => total + (item.count || 1), 0);
-    const segmentUnmutedVideos = seg => (seg.videos || []).filter(item => !item.muted).length;
-    const segmentKeyframeCount = index => (segments[index]?.first_frame ? 1 : 0)
-        + (segments[index]?.last_frame ? 1 : 0);
-    function segmentTagText(seg, index, kind, refIndex) {
-        const mods = segmentModTags(seg);
-        if (kind === "first_frame") return "<Picture 1>";
-        if (kind === "last_frame") return `<Picture ${seg.first_frame ? 2 : 1}>`;
-        if (kind === "image") return `<Picture ${segmentKeyframeCount(index) + refIndex + 1}>`;
-        if (kind === "video") return `<Video ${mods + refIndex + 1}>`;
-        if (kind === "audio") return `<Audio ${segmentUnmutedVideos(seg) + refIndex + 1}>`;
-        if (kind === "mod") {
-            const start = 1 + (seg.mods || []).slice(0, refIndex)
-                .reduce((total, item) => total + (item.count || 1), 0);
-            const count = seg.mods?.[refIndex]?.count || 1;
-            return Array.from({ length: count }, (_, offset) => `<Video ${start + offset}>`).join(" ");
+    function parseShotJson(strict = false) {
+        const sources = [node.properties?.[stateKey], shotJsonW?.value];
+        for (const source of sources) {
+            if (!source) continue;
+            try {
+                const parsed = JSON.parse(source);
+                if (parsed && Array.isArray(parsed.loras) && Array.isArray(parsed.mods)) {
+                    loras = parsed.loras;
+                    mods = parsed.mods;
+                    return true;
+                }
+            } catch {}
         }
-        return "";
+        if (!strict) {
+            loras = [];
+            mods = [];
+        }
+        return false;
     }
-
-    // ── LoRA name source ─────────────────────────────────────────────────────
-    function extractLoraNames(info) {
-        if (!info || typeof info !== "object") return [];
-        const className = Object.keys(info)[0];
-        const spec = info?.[className]?.input;
-        const field = spec?.required?.lora_name || spec?.optional?.lora_name;
-        const options = Array.isArray(field?.[0]) ? field[0] : [];
-        return options.filter(name => typeof name === "string" && name && name !== "None");
+    function syncShotJson() {
+        // Never write while a workflow restore is in flight: the restored
+        // widget value arrives asynchronously and an early write would clobber
+        // it with the pre-restore (empty) state.
+        if (restoring) return;
+        const value = JSON.stringify({ loras, mods });
+        if (shotJsonW && shotJsonW.value !== value) shotJsonW.value = value;
+        node.properties[stateKey] = value;
     }
-    async function fetchLoraNames() {
+    function scheduleSync() {
+        clearTimeout(syncTimer);
+        syncTimer = setTimeout(syncShotJson, 250);
+    }
+    function fetchLoras() {
+        if (loras_fetching || loras_fetched) return Promise.resolve(loras_fetched || []);
+        loras_fetching = true;
         const names = new Set();
-        for (const className of ["LoraLoaderModelOnly", "LoraLoader"]) {
+        const jobs = ["LoraLoaderModelOnly", "LoraLoader"].map(async className => {
             try {
                 const response = await api.fetchApi(`/object_info/${className}`, { cache: "no-store" });
-                if (!response.ok) continue;
-                extractLoraNames(await response.json()).forEach(name => names.add(name));
-            } catch (error) {
-                console.warn("[MiniMax H3 Shots] object_info LoRA lookup failed:", error);
-            }
-        }
-        if (!names.size) {
-            try {
-                const response = await api.fetchApi(`${SEGMENT_LORA_ROUTE}?t=${Date.now()}`, { cache: "no-store" });
-                if (response.ok) {
-                    const data = await response.json();
-                    (Array.isArray(data.loras) ? data.loras : []).forEach(name => names.add(name));
-                }
-            } catch (error) {
-                console.warn("[MiniMax H3 Shots] /minimax_h3/loras failed:", error);
-            }
-        }
-        return [...names].sort((a, b) => a.localeCompare(b));
-    }
-    function loadSegmentLoras() {
-        if (segmentLorasLoading || segmentLoras) return;
-        segmentLorasLoading = true;
-        fetchLoraNames()
-            .then(names => { segmentLoras = names; })
-            .catch(error => {
-                console.error("[MiniMax H3 Shots] LoRA list unavailable:", error);
-                segmentLoras = [];
-            })
-            .finally(() => {
-                segmentLorasLoading = false;
-                rebuildSegmentWidgets();
-            });
-    }
-
-    // ── uploads / mods / prompt tag insertion ────────────────────────────────
-    function uploadSegment(seg, kind) {
-        const input = document.createElement("input");
-        input.type = "file";
-        input.accept = kind === "video" ? "video/*" : kind === "audio" ? "audio/*" : "image/*";
-        input.onchange = async () => {
-            const file = input.files?.[0];
-            if (!file) return;
-            try {
-                const name = await uploadFile(file);
-                if (kind === "first_frame") seg.first_frame = name;
-                else if (kind === "last_frame") seg.last_frame = name;
-                else if (kind === "image" && seg.images.length < MAX_SEG_IMAGES) seg.images.push(name);
-                else if (kind === "video" && seg.videos.length < MAX_SEG_VIDEOS) seg.videos.push({ name, muted: false });
-                else if (kind === "audio" && seg.audios.length < MAX_SEG_AUDIOS) seg.audios.push({ name, trimStart: 0, trimEnd: null });
-                syncShotState();
-            } catch (error) {
-                console.error("[MiniMax H3 Shots] segment upload failed:", error);
-            }
-        };
-        input.click();
-    }
-    function addSegmentMod(seg, entry) {
-        if (!entry || !entry.name || seg.mods.length >= MAX_SEG_MODS) return;
-        seg.mods.push({
-            name: entry.name,
-            strength: 1,
-            count: Math.max(1, Math.min(256, Math.round(Number(entry.visuals) || 1))),
+                if (!response.ok) return;
+                const info = await response.json();
+                const classNameKey = Object.keys(info)[0];
+                const spec = info?.[classNameKey]?.input;
+                const field = spec?.required?.lora_name || spec?.optional?.lora_name;
+                (Array.isArray(field?.[0]) ? field[0] : []).forEach(n => {
+                    if (typeof n === "string" && n && n !== "None") names.add(n);
+                });
+            } catch {}
         });
-        syncShotState();
-    }
-    function insertSegmentPrompt(seg, index, text) {
-        if (!text) return;
-        const promptW = promptWidgetByIndex.get(index);
-        const el = promptElByIndex.get(index);
-        if (el && document.activeElement === el) {
-            const start = el.selectionStart ?? el.value.length;
-            const end = el.selectionEnd ?? start;
-            const next = el.value.slice(0, start) + text + el.value.slice(end);
-            seg.prompt = next;
-            el.value = next;
-            el.selectionStart = el.selectionEnd = start + text.length;
-            if (promptW) promptW.value = next;
-            scheduleSegmentSync();
-            return;
-        }
-        seg.prompt = String(seg.prompt || "") + text;
-        if (promptW?.setValue) promptW.setValue(seg.prompt);
-        else if (promptW) promptW.value = seg.prompt;
-        scheduleSegmentSync();
-    }
-
-    // ── native widget scaffolding ────────────────────────────────────────────
-    function addPanelWidget(type, name, value, callback, options = {}) {
-        const w = node.addWidget(type, name, value, callback, options);
-        w.serialize = false;
-        w.options = { ...(w.options || {}), serialize: false };
-        w._ghh3Shots = true;
-        return w;
-    }
-    function addMultilineWidget(name, value, placeholder, onChange) {
-        const el = document.createElement("textarea");
-        el.className = "comfy-multiline-input";
-        el.placeholder = placeholder || "";
-        el.spellcheck = false;
-        el.style.height = "110px";
-        el.style.minHeight = "110px";
-        el.style.resize = "none";
-        el.style.boxSizing = "border-box";
-        const w = node.addDOMWidget(name, "customtext", el, { serialize: false });
-        w.serialize = false;
-        w.options = { ...(w.options || {}), serialize: false };
-        w._ghh3Shots = true;
-        const promptHeight = 112;
-        w.computeSize = () => [0, promptHeight];
-        el.value = value || "";
-        el.addEventListener("input", () => {
-            w.value = el.value;
-            onChange(el.value);
+        return Promise.all(jobs).then(async () => {
+            if (!names.size) {
+                try {
+                    const response = await api.fetchApi(`/lk/minimax_h3/loras?t=${Date.now()}`, { cache: "no-store" });
+                    if (response.ok) {
+                        const data = await response.json();
+                        (Array.isArray(data.loras) ? data.loras : []).forEach(n => names.add(n));
+                    }
+                } catch {}
+            }
+            loras_fetched = [...names].sort((a, b) => a.localeCompare(b));
+            loras_fetching = false;
+            return loras_fetched;
         });
-        w.setValue = v => {
-            w.value = String(v ?? "");
-            if (el.value !== w.value) el.value = w.value;
-        };
-        return w;
+    }
+    async function fetchRefmodNames() {
+        if (refmod_library) return refmod_library.map(e => e.name);
+        const entries = await loadRefModLibrary();
+        refmod_library = (entries || []).filter(e => e && e.kind !== "audio" && e.visuals !== 0);
+        return refmod_library.map(e => e.name);
     }
 
-    // ── schema widget hooks (range / latent drive the collapse) ─────────────
-    const rangeStartW = widget(node, "range_start");
-    const rangeEndW = widget(node, "range_end");
-    const latentW = widget(node, "latent_continue");
-    function wrapSchemaWidget(w, onChange) {
-        if (!w) return;
-        const old = w.callback;
-        w.callback = function(v) {
-            const r = old?.call(this, v);
-            if (!restoringState) onChange(v);
-            return r;
-        };
-    }
-    function syncFromSchemaWidgets() {
-        segmentRange.start = clampRange(rangeStartW?.value);
-        segmentRange.end = clampRange(rangeEndW?.value);
-        if (segmentRange.start > segmentRange.end) segmentRange.end = segmentRange.start;
-        if (segmentRange.end < segmentRange.start) segmentRange.start = segmentRange.end;
-        latentContinue = latentW?.value !== false;
-    }
-    wrapSchemaWidget(rangeStartW, () => { syncFromSchemaWidgets(); syncShotState(); updateSegmentVisibility(); });
-    wrapSchemaWidget(rangeEndW, () => { syncFromSchemaWidgets(); syncShotState(); updateSegmentVisibility(); });
-    wrapSchemaWidget(latentW, () => { latentContinue = latentW?.value !== false; syncShotState(); redrawMediaWidgets(); });
-
-    function redrawMediaWidgets() {
-        for (const mediaW of mediaWidgetByIndex.values()) mediaW.triggerDraw?.();
-        node.setDirtyCanvas?.(true, true);
-    }
-    function syncShotState() {
-        syncSegmentsWidget();
-        redrawMediaWidgets();
-    }
-
-    // ── canvas chips widget (one per shot block) ─────────────────────────────
-    const measureCtx = document.createElement("canvas").getContext("2d");
-    const CHIP_FONT = "10px Arial,sans-serif";
-    const CHIP_H = 20;
-    const CHIP_PAD = 8;
-    const ROW_GAP = 4;
-    const HEADER_H = 20;
-    const FOOTER_H = 20;
-    const NOTE_H = 16;
-    const CHIP_COLORS = {
-        chipBg: "#1a2938", chipBorder: "#35526a", chipDragBorder: "#0aa4d6",
-        chipText: "#dbe8f1", chipRemove: "#c6d4de", addBg: "#0f1c27",
-        addBorder: "#2f5c72", addText: "#08b4ed", headerText: "#e7f0f7",
-        btnText: "#9db1c0", badgeRunBg: "#134b3d", badgeRunText: "#8fe3c6",
-        badgeSkipBg: "#26414f", badgeSkipText: "#9fc2cf", noteText: "#7f93a4",
-        strengthBox: "#12202c", strengthBorder: "#354b5d",
-    };
-    const thumbCache = new Map();
-    function segmentThumb(name) {
-        if (!name) return null;
-        let entry = thumbCache.get(name);
-        if (!entry) {
-            const img = new Image();
-            entry = { img, loaded: false };
-            img.onload = () => { entry.loaded = true; redrawMediaWidgets(); };
-            img.onerror = () => { entry.loaded = false; };
-            img.src = fileUrl(name);
-            thumbCache.set(name, entry);
-        }
-        return entry;
-    }
-
-    function makeMediaChipsWidget(seg, index) {
-        const inRange = () => index + 1 >= segmentRange.start && index + 1 <= segmentRange.end;
-        const isLast = () => index === segments.length - 1;
-        const w = {
-            name: `${t("Segment")} ${index + 1} · ${t("Reference media")}`,
-            type: "ghh3_shot_media",
-            value: "",
-            options: { serialize: false },
-            serialize: false,
-            _ghh3Shots: true,
-            _ghh3MediaWidget: true,
-            _originX: 0,
-            last_y: 0,
-        };
-        const drag = { active: false, started: false, pending: null, downX: 0, downY: 0, list: null, fromIdx: -1, hoverIdx: -1, modDrag: null };
-        let regions = [];
-
-        function chipItems() {
-            const items = [];
-            if (seg.first_frame) items.push({ kind: "first_frame", label: t("First frame"), tagKind: "first_frame", value: seg.first_frame, thumb: true });
-            else items.push({ kind: "add", label: `＋${t("First frame")}`, act: { type: "upload", arg: "first_frame" } });
-            if (seg.last_frame) items.push({ kind: "last_frame", label: t("Last frame"), tagKind: "last_frame", value: seg.last_frame, thumb: true });
-            else items.push({ kind: "add", label: `＋${t("Last frame")}`, act: { type: "upload", arg: "last_frame" } });
-            (seg.images || []).forEach((name, i) => items.push({
-                kind: "chip", label: `${t("Picture")} ${segmentKeyframeCount(index) + i + 1}`, tagKind: "image",
-                value: name, thumb: true, draggable: true, list: "images", idx: i,
-            }));
-            items.push({ kind: "add", label: `＋${t("Picture")}`, act: { type: "upload", arg: "image" }, disabled: (seg.images || []).length >= MAX_SEG_IMAGES });
-            (seg.videos || []).forEach((item, i) => items.push({
-                kind: "video", label: `${t("Video")} ${segmentModTags(seg) + i + 1}`, tagKind: "video",
-                value: item.name, muted: !!item.muted, draggable: true, list: "videos", idx: i,
-            }));
-            items.push({ kind: "add", label: `＋${t("Video")}`, act: { type: "upload", arg: "video" }, disabled: (seg.videos || []).length >= MAX_SEG_VIDEOS });
-            (seg.audios || []).forEach((item, i) => items.push({
-                kind: "chip", label: `${t("Audio")} ${segmentUnmutedVideos(seg) + i + 1}`, tagKind: "audio",
-                value: item.name, draggable: true, list: "audios", idx: i,
-            }));
-            items.push({ kind: "add", label: `＋${t("Audio")}`, act: { type: "upload", arg: "audio" }, disabled: (seg.audios || []).length >= MAX_SEG_AUDIOS });
-            (seg.mods || []).forEach((item, i) => items.push({
-                kind: "mod", label: `MOD ${item.name}`, tagKind: "mod", value: item.name,
-                strength: item.strength, list: "mods", idx: i,
-            }));
-            return items;
-        }
-        function measureChip(item) {
-            measureCtx.font = CHIP_FONT;
-            const textWidth = measureCtx.measureText(item.label).width;
-            let extra = 6;
-            if (item.thumb) extra += 18;
-            if (item.kind === "video") extra += 15;
-            if (item.kind === "mod") extra += 40;
-            if (item.kind !== "add") extra += 13;
-            return Math.ceil(10 + textWidth + extra);
-        }
-        function layoutRows(width) {
-            const items = chipItems();
-            const rows = [];
-            let row = [];
-            let x = CHIP_PAD;
-            const limit = Math.max(140, width - CHIP_PAD);
-            for (const item of items) {
-                const chipW = measureChip(item);
-                if (row.length && x + chipW > limit) { rows.push(row); row = []; x = CHIP_PAD; }
-                item._w = chipW;
-                item._x = x;
-                row.push(item);
-                x += chipW + ROW_GAP;
-            }
-            if (row.length) rows.push(row);
-            return rows;
-        }
-        w.computeSize = function(width) {
-            const rows = layoutRows(Number(width) || WIDTH);
-            const note = isLast() ? NOTE_H + 2 : 0;
-            return [width, 6 + HEADER_H + rows.length * (CHIP_H + ROW_GAP) + FOOTER_H + note];
-        };
-        function localMouse(e, pos) {
-            let x = Number(pos?.[0]) || 0;
-            let y = Number(pos?.[1]) || 0;
-            const ox = Number(e?.offsetX), oy = Number(e?.offsetY);
-            const sameAsOffsets = Number.isFinite(ox) && Number.isFinite(oy)
-                && Math.abs(ox - x) < 0.75 && Math.abs(oy - y) < 0.75;
-            if (!sameAsOffsets) {
-                x -= w._originX || 0;
-                y -= w.last_y || 0;
-            }
-            return [x, y];
-        }
-        function hitRegion(x, y) {
-            for (const region of regions) {
-                if (x >= region.x && x <= region.x + region.w && y >= region.y && y <= region.y + region.h) return region;
-            }
-            return null;
-        }
-        function drawTextButton(ctx, x, y, bw, bh, label, color) {
-            ctx.fillStyle = CHIP_COLORS.addBg;
-            ctx.strokeStyle = CHIP_COLORS.chipBorder;
-            ctx.lineWidth = 1;
-            roundRectPath(ctx, x, y, bw, bh, 4);
-            ctx.fill();
-            ctx.stroke();
-            ctx.fillStyle = color || CHIP_COLORS.btnText;
-            ctx.font = CHIP_FONT;
-            ctx.textAlign = "center";
-            ctx.textBaseline = "middle";
-            ctx.fillText(label, x + bw / 2, y + bh / 2 + 0.5);
-        }
-        function drawChip(ctx, item, cy) {
-            const x = item._x;
-            const cw = item._w;
-            if (item.kind === "add") {
-                ctx.globalAlpha = item.disabled ? 0.4 : 1;
-                ctx.fillStyle = CHIP_COLORS.addBg;
-                ctx.strokeStyle = CHIP_COLORS.addBorder;
-                ctx.setLineDash([3, 3]);
-                roundRectPath(ctx, x, cy, cw, CHIP_H, 4);
-                ctx.fill();
-                ctx.stroke();
-                ctx.setLineDash([]);
-                ctx.fillStyle = CHIP_COLORS.addText;
-                ctx.font = CHIP_FONT;
-                ctx.textAlign = "left";
-                ctx.textBaseline = "middle";
-                ctx.fillText(item.label, x + 6, cy + CHIP_H / 2 + 0.5);
-                ctx.globalAlpha = 1;
-                if (!item.disabled) regions.push({ x, y: cy, w: cw, h: CHIP_H, act: "upload", arg: item.act.arg });
-                return;
-            }
-            const dragging = drag.active && drag.started && drag.list === item.list && drag.fromIdx === item.idx;
-            const hoverTarget = drag.active && drag.started && drag.list === item.list && drag.hoverIdx === item.idx && drag.fromIdx !== item.idx;
-            ctx.globalAlpha = (!inRange() ? 0.45 : 1) * (dragging ? 0.55 : 1);
-            ctx.fillStyle = CHIP_COLORS.chipBg;
-            ctx.strokeStyle = hoverTarget ? CHIP_COLORS.chipDragBorder : CHIP_COLORS.chipBorder;
-            ctx.lineWidth = hoverTarget ? 1.5 : 1;
-            roundRectPath(ctx, x, cy, cw, CHIP_H, 4);
-            ctx.fill();
-            ctx.stroke();
-            let tx = x + 5;
-            ctx.textAlign = "left";
-            ctx.textBaseline = "middle";
-            if (item.thumb) {
-                const entry = segmentThumb(item.value);
-                if (entry?.loaded && entry.img.naturalWidth) {
-                    const img = entry.img;
-                    const size = CHIP_H - 6;
-                    const scale = Math.min(size / img.naturalWidth, size / img.naturalHeight);
-                    const dw = Math.max(1, img.naturalWidth * scale);
-                    const dh = Math.max(1, img.naturalHeight * scale);
-                    ctx.save();
-                    roundRectPath(ctx, tx, cy + 3, size, size, 3);
-                    ctx.clip();
-                    ctx.drawImage(img, tx + (size - dw) / 2, cy + 3 + (size - dh) / 2, dw, dh);
-                    ctx.restore();
-                } else {
-                    ctx.strokeStyle = CHIP_COLORS.chipBorder;
-                    roundRectPath(ctx, tx, cy + 3, CHIP_H - 6, CHIP_H - 6, 3);
-                    ctx.stroke();
-                }
-                tx += 18;
-            }
-            ctx.fillStyle = CHIP_COLORS.chipText;
-            ctx.font = CHIP_FONT;
-            ctx.fillText(item.label, tx, cy + CHIP_H / 2 + 0.5);
-            measureCtx.font = CHIP_FONT;
-            tx += measureCtx.measureText(item.label).width + 3;
-            if (item.kind === "video") {
-                const muteX = x + cw - 12 - 15;
-                ctx.fillStyle = item.muted ? "#8fe3c6" : CHIP_COLORS.chipText;
-                ctx.font = "9px Arial,sans-serif";
-                ctx.fillText(item.muted ? "🔇" : "🔊", muteX + 2, cy + CHIP_H / 2 + 0.5);
-                regions.push({ x: muteX, y: cy + 1, w: 15, h: CHIP_H - 2, act: "mute", idx: item.idx });
-            }
-            if (item.kind === "mod") {
-                const strength = item.strength ?? 1;
-                const boxW = 30;
-                const boxX = x + cw - 12 - 30;
-                ctx.fillStyle = CHIP_COLORS.strengthBox;
-                ctx.strokeStyle = CHIP_COLORS.strengthBorder;
-                roundRectPath(ctx, boxX, cy + 3, boxW, CHIP_H - 6, 3);
-                ctx.fill();
-                ctx.stroke();
-                ctx.fillStyle = CHIP_COLORS.chipText;
-                ctx.font = "9px Arial,sans-serif";
-                ctx.textAlign = "center";
-                ctx.fillText(Number(strength).toFixed(2), boxX + boxW / 2, cy + CHIP_H / 2 + 0.5);
-                regions.push({ x: boxX, y: cy + 1, w: boxW, h: CHIP_H - 2, act: "mod-strength", idx: item.idx, list: item.list });
-            }
-            const removeX = x + cw - 12;
-            ctx.fillStyle = CHIP_COLORS.chipRemove;
-            ctx.font = "10px Arial,sans-serif";
-            ctx.textAlign = "center";
-            ctx.fillText("×", removeX + 6, cy + CHIP_H / 2 + 0.5);
-            regions.push({ x: removeX, y: cy + 1, w: 12, h: CHIP_H - 2, act: "remove", list: item.list, idx: item.idx, kind: item.kind });
-            regions.push({
-                x, y: cy, w: cw, h: CHIP_H, act: "insert", tagKind: item.tagKind, idx: item.idx,
-                list: item.list, draggable: !!item.draggable,
-            });
-            ctx.globalAlpha = 1;
-        }
-
-        w.draw = function(ctx, nodeRef, width, y) {
-            const vueLike = Number(y) <= 2;
-            const originX = vueLike ? 0 : 6;
-            const originY = vueLike ? 0 : Number(y) || 0;
-            this.last_y = Number(y) || 0;
-            this._originX = originX;
-            const widgetWidth = Number(width) || WIDTH;
-            const rows = layoutRows(widgetWidth);
-            regions = [];
-            this._hitRegions = regions;
-            ctx.save();
-            ctx.translate(originX, originY);
-            ctx.textBaseline = "middle";
-            const dim = inRange() ? 1 : 0.6;
-            ctx.globalAlpha = dim;
-            const titleText = `${t("Segment")} ${index + 1}`;
-            ctx.font = "bold 11px Arial,sans-serif";
-            ctx.fillStyle = CHIP_COLORS.headerText;
-            ctx.textAlign = "left";
-            ctx.fillText(titleText, 0, HEADER_H / 2 + 1);
-            const titleW = ctx.measureText(titleText).width;
-            ctx.font = "9px Arial,sans-serif";
-            const badgeText = inRange() ? t("Run") : t("Skipped");
-            const badgeW = Math.ceil(ctx.measureText(badgeText).width) + 8;
-            ctx.fillStyle = inRange() ? CHIP_COLORS.badgeRunBg : CHIP_COLORS.badgeSkipBg;
-            roundRectPath(ctx, titleW + 8, 2, badgeW, HEADER_H - 4, 4);
-            ctx.fill();
-            ctx.fillStyle = inRange() ? CHIP_COLORS.badgeRunText : CHIP_COLORS.badgeSkipText;
-            ctx.textAlign = "center";
-            ctx.fillText(badgeText, titleW + 8 + badgeW / 2, HEADER_H / 2 + 1);
-            ctx.font = CHIP_FONT;
-            const buttons = [];
-            if (index > 0) buttons.push({ label: t("Copy previous"), act: "copy" });
-            let bx = widgetWidth - 8;
-            for (let i = buttons.length - 1; i >= 0; i -= 1) {
-                const button = buttons[i];
-                const bw = Math.ceil(ctx.measureText(button.label).width) + 12;
-                bx -= bw;
-                drawTextButton(ctx, bx, 1, bw, HEADER_H - 2, button.label);
-                regions.push({ x: bx, y: 1, w: bw, h: HEADER_H - 2, act: button.act });
-                bx -= 4;
-            }
-            let cy = HEADER_H + ROW_GAP;
-            for (const rowItems of rows) {
-                for (const item of rowItems) drawChip(ctx, item, cy);
-                cy += CHIP_H + ROW_GAP;
-            }
-            ctx.font = CHIP_FONT;
-            const footer = [];
-            if (seg.loras.length < MAX_SEG_LORAS) footer.push({ label: t("Add LoRA"), act: "add-lora" });
-            if (seg.mods.length < MAX_SEG_MODS) footer.push({ label: t("Add RefMod"), act: "add-refmod" });
-            footer.push({ label: "↻", act: "refresh-loras" });
-            let fx = CHIP_PAD;
-            for (const item of footer) {
-                const bw = Math.ceil(ctx.measureText(item.label).width) + 12;
-                drawTextButton(ctx, fx, cy, bw, CHIP_H - 2, item.label);
-                regions.push({ x: fx, y: cy, w: bw, h: CHIP_H - 2, act: item.act });
-                fx += bw + ROW_GAP;
-            }
-            if (isLast()) {
-                const note = t(latentContinue
-                    ? "Latent continuation is ON: the previous segment's last 7 latent tokens are carried into the next segment; no first-frame keyframe and no pixel overlap are used."
-                    : "Latent continuation is OFF: segments are joined with a hard cut and no seam blending.");
-                ctx.fillStyle = CHIP_COLORS.noteText;
-                ctx.font = "9px Arial,sans-serif";
-                ctx.textAlign = "left";
-                let clipped = note;
-                while (clipped.length > 4 && ctx.measureText(clipped).width > widgetWidth - CHIP_PAD * 2) clipped = clipped.slice(0, -1);
-                ctx.fillText(clipped, 0, cy + CHIP_H + NOTE_H / 2);
-            }
-            ctx.restore();
-            ctx.globalAlpha = 1;
-        };
-
-        function clearDrag() {
-            drag.active = false; drag.started = false; drag.pending = null;
-            drag.list = null; drag.fromIdx = -1; drag.hoverIdx = -1; drag.modDrag = null;
-        }
-        function commitReorder(listName, fromIdx, hoverIdx) {
-            if (!listName || hoverIdx < 0 || fromIdx < 0 || fromIdx === hoverIdx) return;
-            const items = seg[listName];
-            if (!Array.isArray(items) || fromIdx >= items.length) return;
-            const to = Math.max(0, Math.min(items.length - 1, hoverIdx));
-            const [moved] = items.splice(fromIdx, 1);
-            items.splice(to, 0, moved);
-            syncShotState();
-        }
-        function runAction(region) {
-            switch (region.act) {
-                case "upload": uploadSegment(seg, region.arg); break;
-                case "insert": insertSegmentPrompt(seg, index, segmentTagText(seg, index, region.tagKind, region.idx)); break;
-                case "mute": {
-                    const item = seg.videos?.[region.idx];
-                    if (item) { item.muted = !item.muted; syncShotState(); }
-                    break;
-                }
-                case "remove": {
-                    if (region.kind === "first_frame") seg.first_frame = "";
-                    else if (region.kind === "last_frame") seg.last_frame = "";
-                    else if (Array.isArray(seg[region.list])) seg[region.list].splice(region.idx, 1);
-                    syncShotState();
-                    break;
-                }
-                case "copy": copyPreviousSegment(index); break;
-                case "add-lora": {
-                    if (seg.loras.length < MAX_SEG_LORAS) {
-                        seg.loras.push({ name: "", strength_model: 1 });
-                        syncShotState();
-                        rebuildSegmentWidgets();
-                    }
-                    break;
-                }
-                case "add-refmod": {
-                    ensureRefmodPickerStyle();
-                    openRefModPicker(entry => addSegmentMod(seg, entry));
-                    break;
-                }
-                case "refresh-loras": refreshSegmentLoras(); break;
-                default: break;
-            }
-        }
-        w.mouse = function(e, pos, nodeRef) {
-            const type = String(e?.type || "");
-            const [lx, ly] = localMouse(e, pos);
-            if (type === "pointerdown") {
-                const region = hitRegion(lx, ly);
-                drag.pending = region || null;
-                drag.downX = lx; drag.downY = ly;
-                drag.active = !!(region && region.draggable);
-                drag.started = false;
-                drag.list = drag.active ? region.list : null;
-                drag.fromIdx = drag.active ? region.idx : -1;
-                drag.hoverIdx = drag.fromIdx;
-                if (region?.act === "mod-strength") {
-                    drag.modDrag = { idx: region.idx, startX: lx, start: seg.mods?.[region.idx]?.strength ?? 1 };
-                }
-                return true;
-            }
-            if (type === "pointermove") {
-                if (drag.modDrag) {
-                    const item = seg.mods?.[drag.modDrag.idx];
-                    if (item) {
-                        item.strength = Math.max(0.05, Math.min(1, drag.modDrag.start + (lx - drag.modDrag.startX) / 150));
-                        scheduleSegmentSync();
-                        return true;
-                    }
-                }
-                if (drag.active) {
-                    if (!drag.started && Math.abs(lx - drag.downX) + Math.abs(ly - drag.downY) > 6) drag.started = true;
-                    if (drag.started) {
-                        const target = hitRegion(lx, ly);
-                        drag.hoverIdx = target && target.list === drag.list ? target.idx : -1;
-                        return true;
-                    }
-                }
-                return false;
-            }
-            if (type === "pointerup" || type === "pointercancel") {
-                const pending = drag.pending;
-                const moved = Math.abs(lx - drag.downX) + Math.abs(ly - drag.downY);
-                const wasDragging = drag.active && drag.started;
-                const reorder = { list: drag.list, fromIdx: drag.fromIdx, hoverIdx: drag.hoverIdx };
-                clearDrag();
-                if (wasDragging) { commitReorder(reorder.list, reorder.fromIdx, reorder.hoverIdx); return true; }
-                if (pending && moved <= 6) runAction(pending);
-                return true;
-            }
-            return false;
-        };
-        return w;
-    }
-
-    // ── segment widget tree ─────────────────────────────────────────────────
-    const segmentWidgets = [];
-    const promptWidgetByIndex = new Map();
-    const promptElByIndex = new Map();
-    const mediaWidgetByIndex = new Map();
-    const segmentRowWidgets = new Map();
-    const loraOptions = entry => {
-        const names = Array.isArray(segmentLoras) ? segmentLoras : [];
-        const values = ["None", ...names];
-        if (entry?.name && !values.includes(entry.name)) values.push(entry.name);
-        return values;
-    };
-    function clearSegmentWidgets() {
-        for (const w of segmentWidgets) {
-            if (w.element?.parentNode) w.element.parentNode.removeChild(w.element);
-            w.onRemove?.();
+    function clearPanelWidgets() {
+        for (const w of shotWidgets) {
             const at = node.widgets.indexOf(w);
             if (at >= 0) node.widgets.splice(at, 1);
         }
-        segmentWidgets.length = 0;
-        segmentRowWidgets.clear();
-        promptWidgetByIndex.clear();
-        promptElByIndex.clear();
-        mediaWidgetByIndex.clear();
+        shotWidgets.length = 0;
     }
-    function segmentInRange(index) {
-        return index + 1 >= segmentRange.start && index + 1 <= segmentRange.end;
-    }
-    function applyRowHidden(w, hidden) {
-        if (!w || w.hidden === hidden) return;
-        w.hidden = hidden;
-        w.options = { ...(w.options || {}), hidden };
-    }
-    function updateSegmentVisibility() {
-        for (const [index, rows] of segmentRowWidgets) {
-            const hidden = !segmentInRange(index);
-            for (const w of rows) applyRowHidden(w, hidden);
-        }
-        if (node.graph) fitNodeHeight();
-    }
-    function makeGroupSeparator(label) {
-        const w = {
-            name: `ghh3_group_${label}`,
-            type: "ghh3_shot_label",
-            value: "",
-            options: { serialize: false },
-            serialize: false,
-            _ghh3Shots: true,
-        };
-        w.computeSize = () => [0, 18];
-        w.draw = function(ctx, nodeRef, width, y) {
-            const vueLike = Number(y) <= 2;
-            const originX = vueLike ? 0 : 6;
-            const originY = vueLike ? 0 : Number(y) || 0;
-            this.last_y = Number(y) || 0;
-            ctx.save();
-            ctx.translate(originX, originY);
-            ctx.globalAlpha = 0.9;
-            ctx.strokeStyle = "#2a4353";
-            ctx.beginPath();
-            ctx.moveTo(0, 15);
-            ctx.lineTo(Math.max(0, (Number(width) || WIDTH) - 8), 15);
-            ctx.stroke();
-            ctx.fillStyle = "#7f93a4";
-            ctx.font = "bold 10px Arial,sans-serif";
-            ctx.textAlign = "left";
-            ctx.textBaseline = "middle";
-            ctx.fillText(label, 0, 8);
-            ctx.restore();
-            ctx.globalAlpha = 1;
-        };
+    function addRow(type, name, value, callback, options = {}) {
+        const w = node.addWidget(type, name, value, callback, options);
+        w.serialize = false;
+        w.options = { ...(w.options || {}), serialize: false };
+        w._ghh3Shot = true;
+        shotWidgets.push(w);
         return w;
     }
-    function makeConnRowWidget(group, index, label) {
-        const name = `${group}_row_${index}`;
-        const w = {
-            name,
-            type: "ghh3_shot_connrow",
-            value: "",
-            options: { serialize: false },
-            serialize: false,
-            _ghh3Shots: true,
-        };
-        w.computeSize = () => [0, 22];
-        w.draw = function(ctx, nodeRef, width, y) {
-            const vueLike = Number(y) <= 2;
-            const originX = vueLike ? 0 : 6;
-            const originY = vueLike ? 0 : Number(y) || 0;
-            this.last_y = Number(y) || 0;
-            ctx.save();
-            ctx.translate(originX, originY);
-            ctx.globalAlpha = 0.55;
-            ctx.fillStyle = "#7f93a4";
-            ctx.font = "9px Arial,sans-serif";
-            ctx.textAlign = "left";
-            ctx.textBaseline = "middle";
-            ctx.fillText(`└ ${label}（连线）`, 26, 12);
-            ctx.restore();
-            ctx.globalAlpha = 1;
-        };
+    function addButtonRow(label, onClick) {
+        const w = node.addWidget("button", label, null, () => onClick());
+        w.serialize = false;
+        w.options = { ...(w.options || {}), serialize: false };
+        w._ghh3Shot = true;
+        shotWidgets.push(w);
         return w;
     }
-    function buildSegmentWidgets() {
-        segmentRowWidgets.clear();
-        segments.forEach((seg, index) => {
-            if (index === 0 || index === 4) {
-                const separator = makeGroupSeparator(index === 0 ? t("Shots 1-4") : t("Shots 5-8"));
-                node.addCustomWidget(separator);
-                segmentWidgets.push(separator);
-            }
-            const labelPrefix = `${t("Segment")} ${index + 1}`;
-            const rows = [];
-            const durationW = addPanelWidget("number", `${labelPrefix} · ${t("Duration (seconds)")}`, seg.duration, value => {
-                seg.duration = Math.max(2, Math.min(30, Math.round(Number(value) || 5)));
-                durationW.value = seg.duration;
-                scheduleSegmentSync();
-            }, { min: 2, max: 30, step: 1, precision: 0 });
-            rows.push(durationW);
-            const promptW = addMultilineWidget(`${labelPrefix} · ${t("Prompt")}`, seg.prompt, t("Segment prompt: click a reference chip to insert its tag"), value => {
-                seg.prompt = String(value ?? "");
-                scheduleSegmentSync();
-            });
-            promptWidgetByIndex.set(index, promptW);
-            promptElByIndex.set(index, promptW.element);
-            rows.push(promptW);
-            const mediaW = makeMediaChipsWidget(seg, index);
-            node.addCustomWidget(mediaW);
-            mediaWidgetByIndex.set(index, mediaW);
-            segmentWidgets.push(durationW, promptW, mediaW);
-            for (const { group, label } of CONN_SLOT_GROUPS) {
-                const row = makeConnRowWidget(group, index, label);
-                node.addCustomWidget(row);
-                segmentWidgets.push(row);
-            }
-            seg.loras.forEach((entry, slot) => {
-                const comboW = addPanelWidget("combo", `LoRA ${slot + 1}`, entry.name || "None", value => {
-                    if (restoringState) return;
-                    const name = !value || value === "None" ? "" : String(value);
-                    if (!name) {
-                        seg.loras.splice(slot, 1);
-                        syncShotState();
-                        rebuildSegmentWidgets();
-                    } else {
-                        entry.name = name;
-                        syncShotState();
-                    }
-                }, { values: loraOptions(entry) });
-                const strengthW = addPanelWidget("number", `LoRA ${slot + 1} · ${t("Model strength")}`, entry.strength_model ?? 1, value => {
-                    entry.strength_model = Math.max(-10, Math.min(10, Number(value) || 0));
-                    scheduleSegmentSync();
-                }, { min: -10, max: 10, step: 0.05, precision: 2 });
-                rows.push(comboW, strengthW);
-                segmentWidgets.push(comboW, strengthW);
-            });
-            segmentRowWidgets.set(index, rows);
-        });
-        updateSegmentVisibility();
-    }
-
-    // ── per-shot connection slots (fixed pool of 8 per kind, bound to rows) ──
-    const CONN_SLOT_GROUPS = [
-        { group: "conn_image", type: "IMAGE", label: t("Picture") },
-        { group: "conn_video", type: "VIDEO", label: t("Video") },
-        { group: "conn_audio", type: "AUDIO", label: t("Audio") },
-    ];
-    function syncConnSlots() {
-        if (!node.graph || !Array.isArray(node.inputs)) return;
-        for (const { group, type, label } of CONN_SLOT_GROUPS) {
-            for (let i = 0; i < MAX_SEGMENTS; i += 1) {
-                const name = `${group}_${i}`;
-                const existing = node.inputs.find(inp => inp.name === name);
-                if (existing) {
-                    if (!existing.widget?.name) existing.widget = { name: `${group}_row_${i}` };
-                    continue;
-                }
-                let insertAt = node.inputs.length;
-                for (let j = node.inputs.length - 1; j >= 0; j -= 1) {
-                    const inp = node.inputs[j];
-                    if (typeof inp?.name === "string" && inp.name.startsWith(group + "_")) { insertAt = j + 1; break; }
-                }
-                node.inputs.splice(insertAt, 0, {
-                    name,
-                    label: `${label} ${i + 1}（连线）`,
-                    type,
-                    optional: true,
-                    widget: { name: `${group}_row_${i}` },
-                });
-            }
-        }
-        node.setDirtyCanvas?.(true, true);
-    }
-
-    function rebuildSegmentWidgets() {
-        clearSegmentWidgets();
-        buildSegmentWidgets();
+    function fit() {
         if (node.graph) node.arrange?.();
-        syncConnSlots();
-        fitNodeHeight();
+        const fitted = typeof node.computeSize === "function" ? node.computeSize() : null;
+        if (fitted && Number.isFinite(fitted[1]) && Math.abs(node.size[1] - Math.ceil(fitted[1])) > 2) {
+            node.setSize([node.size[0], Math.ceil(fitted[1])]);
+        }
         node.setDirtyCanvas?.(true, true);
     }
-    function fitNodeHeight() {
-        if (!node.graph) return;
-        node.arrange?.();
-        let bottom = 0;
-        for (const w of node.widgets || []) {
-            if (w.hidden) continue;
-            const y = Number.isFinite(w.y) ? w.y : 0;
-            const h = Number(w.computedHeight);
-            bottom = Math.max(bottom, y + (Number.isFinite(h) && h > 0 ? h : 30));
-        }
-        const target = Math.ceil(bottom + 10);
-        if (Number.isFinite(target) && target > 120 && Math.abs((node.size?.[1] ?? 0) - target) > 2) {
-            node.setSize([node.size[0], target]);
-        }
+
+    function rebuildRows() {
+        clearPanelWidgets();
+        const loraNames = loras_fetched || [];
+        loras.forEach((entry, i) => {
+            const values = ["None", ...loraNames];
+            if (entry.name && !values.includes(entry.name)) values.push(entry.name);
+            const combo = addRow("combo", `LoRA ${i + 1}`, entry.name || "None", v => {
+                if (restoring) return;
+                const name = !v || v === "None" ? "" : String(v);
+                if (!name) { loras.splice(i, 1); scheduleSync(); rebuildRows(); }
+                else { entry.name = name; scheduleSync(); }
+            }, { values });
+            addRow("number", `LoRA ${i + 1} 强度`, entry.strength_model ?? 1, v => {
+                entry.strength_model = Math.max(-10, Math.min(10, Number(v) || 0));
+                scheduleSync();
+            }, { min: -10, max: 10, step: 0.05, precision: 2 });
+        });
+        mods.forEach((entry, i) => {
+            const names = (refmod_library || []).map(e => e.name);
+            const values = ["None", ...names];
+            if (entry.name && !values.includes(entry.name)) values.push(entry.name);
+            const combo = addRow("combo", `RefMod ${i + 1}`, entry.name || "None", v => {
+                if (restoring) return;
+                const name = !v || v === "None" ? "" : String(v);
+                if (!name) { mods.splice(i, 1); scheduleSync(); rebuildRows(); }
+                else {
+                    entry.name = name;
+                    const lib = (refmod_library || []).find(e => e.name === name);
+                    if (lib) entry.count = Math.max(1, Math.min(256, Math.round(Number(lib.visuals) || 1)));
+                    scheduleSync();
+                }
+            }, { values });
+            addRow("number", `RefMod ${i + 1} 强度`, entry.strength ?? 1, v => {
+                entry.strength = Math.max(0.05, Math.min(1, Number(v) || 1));
+                scheduleSync();
+            }, { min: 0.05, max: 1, step: 0.05, precision: 2 });
+            addRow("number", `RefMod ${i + 1} 占用`, entry.count ?? 1, v => {
+                entry.count = Math.max(1, Math.min(256, Math.round(Number(v) || 1)));
+                scheduleSync();
+            }, { min: 1, max: 256, step: 1, precision: 0 });
+        });
+        if (loras.length < MAX_SEG_LORAS) addButtonRow("＋ LoRA", () => {
+            if (loras.length >= MAX_SEG_LORAS) return;
+            loras.push({ name: "", strength_model: 1 });
+            scheduleSync();
+            rebuildRows();
+            fetchLoras().then(() => rebuildRows());
+        });
+        if (mods.length < MAX_SEG_MODS) addButtonRow("＋ RefMod", () => {
+            if (mods.length >= MAX_SEG_MODS) return;
+            ensureRefmodPickerStyle();
+            openRefModPicker(entry => {
+                mods.push({
+                    name: entry.name,
+                    strength: 1,
+                    count: Math.max(1, Math.min(256, Math.round(Number(entry.visuals) || 1))),
+                });
+                scheduleSync();
+                rebuildRows();
+            });
+        });
+        fit();
     }
 
-    function copyPreviousSegment(index) {
-        const previous = segments[index - 1];
-        if (!previous) return;
-        segments[index] = normalizeSegment(JSON.parse(JSON.stringify(previous)));
-        syncShotState();
-        rebuildSegmentWidgets();
+    async function refreshLibraries() {
+        await Promise.all([fetchLoras(), fetchRefmodNames().catch(() => [])]);
+        rebuildRows();
     }
 
-    // ── serialization + restore ──────────────────────────────────────────────
-    function restoreFrom() {
-        const restored = savedShotsState();
-        if (Array.isArray(restored.segments) && restored.segments.length) {
-            const restoredSegments = restored.segments.slice(0, MAX_SEGMENTS).map(normalizeSegment);
-            for (let i = 0; i < MAX_SEGMENTS; i += 1) segments[i] = restoredSegments[i] || defaultSegment(5);
+    // ── lifecycle ────────────────────────────────────────────────────────────
+    parseShotJson();
+    rebuildRows();
+    refreshLibraries();
+    // Creation-time init is done: allow panel edits to sync (workflow
+    // configure re-arms `restoring` through the hooks below).
+    restoring = false;
+
+    const oldSerialize = node.onSerialize;
+    node.onSerialize = function(...args) {
+        syncShotJson();
+        const serializedNode = args[0];
+        if (serializedNode) {
+            serializedNode.properties = serializedNode.properties || {};
+            serializedNode.properties[stateKey] = node.properties[stateKey];
         }
-        ensureEightSegments();
-        const restoredRange = restored.range;
-        segmentRange = {
-            start: clampRange(restoredRange?.start ?? rangeStartW?.value ?? 1),
-            end: clampRange(restoredRange?.end ?? rangeEndW?.value ?? 1),
-        };
-        if (segmentRange.start > segmentRange.end) [segmentRange.start, segmentRange.end] = [segmentRange.end, segmentRange.start];
-        const restoredLatent = restored.latent_continue;
-        latentContinue = restoredLatent !== undefined ? restoredLatent !== false : latentW?.value !== false;
-        if (latentW && latentW.value !== latentContinue) latentW.value = latentContinue;
-        if (rangeStartW && rangeStartW.value !== String(segmentRange.start)) rangeStartW.value = String(segmentRange.start);
-        if (rangeEndW && rangeEndW.value !== String(segmentRange.end)) rangeEndW.value = String(segmentRange.end);
-        rebuildSegmentWidgets();
-        syncSegmentsWidget();
-    }
-    for (const hook of ["onAdded", "onConfigure", "onGraphConfigured"]) {
+        return oldSerialize?.apply(this, args);
+    };
+    // First layout pass once the node is in the graph (the creation-time fit
+    // is skipped because the graph reference doesn't exist yet).
+    const oldAdded = node.onAdded;
+    node.onAdded = function(...args) {
+        const result = oldAdded?.apply(this, args);
+        if (this.graph) fit();
+        return result;
+    };
+    for (const hook of ["onConfigure", "onGraphConfigured"]) {
         const old = node[hook];
         node[hook] = function(...args) {
             const result = old?.apply(this, args);
-            if (hook === "onAdded") {
-                if (this.graph) {
-                    this.arrange?.();
-                    syncConnSlots();
+            restoring = true;
+            const epoch = ++restoreEpoch;
+            // The frontend restores widget values asynchronously: retry until
+            // the saved rows actually arrive (bounded), never clobber while
+            // restoring.
+            let attempt = 0;
+            const tryRestore = () => {
+                if (epoch !== restoreEpoch) return;
+                const accepted = parseShotJson(true);
+                if (accepted || attempt >= 4) {
+                    rebuildRows();
+                    restoring = false;
+                    return;
                 }
-                return result;
-            }
-            restoringState = true;
-            const currentRestoreEpoch = ++restoreEpoch;
-            setTimeout(() => {
-                if (currentRestoreEpoch !== restoreEpoch) return;
-                restoreFrom();
-                if (currentRestoreEpoch === restoreEpoch) {
-                    restoringState = false;
-                }
-            }, 0);
+                attempt += 1;
+                setTimeout(tryRestore, 300);
+            };
+            setTimeout(tryRestore, 0);
             return result;
         };
     }
-
-    const oldRemoved = node.onRemoved;
-    node.onRemoved = function(...args) {
-        clearTimeout(segmentPersistTimer);
-        return oldRemoved?.apply(this, args);
-    };
-
-    // ── initial build ────────────────────────────────────────────────────────
-    syncFromSchemaWidgets();
-    ensureEightSegments();
-    syncSegmentsWidget();
-    rebuildSegmentWidgets();
-    loadSegmentLoras();
-    if (!Number(node.size?.[0]) || node.size[0] < WIDTH) {
-        node.size[0] = WIDTH;
-        node.setDirtyCanvas?.(true, true);
-    }
-    setTimeout(() => {
-        if (restoreEpoch !== 0) return;
-        restoringState = false;
-        syncSegmentsWidget();
-    }, 0);
     return true;
 }
 
@@ -2633,11 +1905,11 @@ app.registerExtension({
         await app.ensureNodesRegistered(new Set(RH_NODE_IDS));
     },
     async beforeRegisterNodeDef(nodeType, nodeData) {
-        if (nodeData.name === "LKH3Shots") {
-            const previousShots = nodeType.prototype.onNodeCreated;
+        if (nodeData.name === "LKH3Shot") {
+            const previousShot = nodeType.prototype.onNodeCreated;
             nodeType.prototype.onNodeCreated = function() {
-                const result = previousShots?.apply(this, arguments);
-                if (!this._ghH3PanelReady && createShotsPanel(this)) this._ghH3PanelReady = true;
+                const result = previousShot?.apply(this, arguments);
+                if (!this._ghH3PanelReady && createShotPanel(this)) this._ghH3PanelReady = true;
                 return result;
             };
             return;
@@ -2655,7 +1927,8 @@ app.registerExtension({
 const LK_TITLES = {
     LKH3Studio: "MiniMaxH3长视频操作台（lanxi)",
     LKH3Settings: "MiniMaxH3模型设置（lanxi）",
-    LKH3Shots: "MiniMaxH3分镜编排（lanxi）",
+    LKH3Shot: "MiniMaxH3分镜（lanxi）",
+    LKH3Shots: "MiniMaxH3分镜合成（lanxi）",
     LKH3LongVideo: "MiniMax-H3 长视频分段采样（lanxi）",
 };
 app.registerExtension({

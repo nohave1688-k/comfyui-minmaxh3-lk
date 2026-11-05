@@ -439,6 +439,129 @@ def build_multi_plan(*, aspect, megapixels, segments_json, clip_name, video_vae_
     return preview, preview["refmods"], plan
 
 
+def _clamp_shot_mods(raw_mods):
+    mods = []
+    for item in raw_mods or []:
+        if isinstance(item, str):
+            item = {"name": item}
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name or name in {"(none)", "None"}:
+            continue
+        mods.append({
+            "name": name,
+            "strength": max(0.05, min(1.0, float(item.get("strength") or 1) or 1)),
+            "count": max(1, min(256, int(item.get("count") or 1))),
+        })
+    return mods[:MAX_MODS]
+
+
+def _clamp_shot_loras(raw_loras):
+    loras = []
+    for item in raw_loras or []:
+        if isinstance(item, str):
+            item = {"name": item}
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name or name in {"(none)", "None"}:
+            continue
+        loras.append({
+            "name": name,
+            "strength_model": max(-10.0, min(10.0, float(item.get("strength_model") or 1) or 1)),
+        })
+    return loras[:MAX_LORAS]
+
+
+def build_plan_from_shot_nodes(*, settings, shots, latent_continue=True,
+                               range_start=1, range_end=1):
+    """Assemble the long-video plan from LKH3Settings + ordered LKH3Shot nodes.
+
+    Each shot dict carries its own media as tensors (first_frame, last_frame,
+    images/videos/audios lists) which are routed through the same
+    ``connected_by_segment`` channel the socket path uses, so
+    :func:`build_segment_bundle` consumes them unchanged.  CLIP stays None
+    (the sampler lazy-loads it); both VAEs are loaded here because the sampler
+    decodes with them directly.
+    """
+    if not isinstance(settings, dict) or not settings:
+        raise ValueError("请先连接「MiniMaxH3模型设置」节点：分镜合成需要模型设置输入。")
+    if not isinstance(shots, (list, tuple)) or not shots:
+        raise ValueError("至少连接一个「MiniMaxH3分镜」节点到分镜合成节点。")
+
+    try:
+        start = max(1, min(MAX_SEGMENTS, int(range_start)))
+        end = max(1, min(MAX_SEGMENTS, int(range_end)))
+    except (TypeError, ValueError):
+        start, end = 1, 1
+    if start > end:
+        start, end = end, start
+
+    aspect = settings.get("aspect", "adaptive")
+    megapixels = settings.get("megapixels", 0.5)
+    clip_name = settings.get("clip_name")
+    video_vae_name = settings.get("video_vae_name")
+    audio_vae_name = settings.get("audio_vae_name")
+    if not clip_name:
+        raise ValueError("模型设置节点未提供 CLIP 模型，请在设置节点上选择。")
+
+    segments, connected_by_segment = [], {}
+    for i, shot in enumerate(shots[:MAX_SEGMENTS]):
+        idx = i + 1
+        shot = shot if isinstance(shot, dict) else {}
+        try:
+            duration = max(MIN_DURATION, min(MAX_DURATION, int(shot.get("duration") or 5)))
+        except (TypeError, ValueError):
+            duration = 5
+        segments.append({
+            "duration": duration,
+            "prompt": str(shot.get("prompt") or ""),
+            "length": _media().calculate_length(duration),
+            "mods": _clamp_shot_mods(shot.get("mods")),
+            "loras": _clamp_shot_loras(shot.get("loras")),
+            "index": idx,
+        })
+        connected_by_segment[idx] = {
+            "first_frame": shot.get("first_frame"),
+            "last_frame": shot.get("last_frame"),
+            "images": list(shot.get("images") or []),
+            "videos": list(shot.get("videos") or []),
+            "audios": list(shot.get("audios") or []),
+        }
+
+    first_conn = connected_by_segment.get(start) or {}
+    source_width, source_height = _connected_source_size(first_conn)
+    width, height = _media().calculate_canvas(aspect, megapixels, source_width, source_height)
+
+    video_vae = comfy_nodes.VAELoader().load_vae(video_vae_name)[0] if video_vae_name else None
+    audio_vae = comfy_nodes.VAELoader().load_vae(audio_vae_name)[0] if audio_vae_name else None
+
+    return {
+        "version": 1,
+        "segments": segments,
+        "count": len(segments),
+        "range": {"start": start, "end": end},
+        "latent_continue": bool(latent_continue),
+        "width": width,
+        "height": height,
+        "clip_name": clip_name,
+        "video_vae_name": video_vae_name,
+        "audio_vae_name": audio_vae_name,
+        "aspect": aspect,
+        "megapixels": megapixels,
+        "audio_mode": settings.get("audio_mode", "native"),
+        "audio_denoise_strength": 0.0,
+        "strict_prompt_tags": False,
+        "ref_image_size": settings.get("ref_image_size", "match"),
+        "clip": None,
+        "video_vae": video_vae,
+        "audio_vae": audio_vae,
+        "connected_by_segment": connected_by_segment,
+        "preview": None,
+    }
+
+
 def build_plan_from_shots(*, settings, segments_json, latent_continue=True,
                           range_start=1, range_end=1, connected_media=None,
                           connected_apply="all segments"):

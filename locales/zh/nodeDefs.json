@@ -215,19 +215,49 @@
       }
     }
   },
+  "LKH3Shot": {
+    "display_name": "MiniMaxH3分镜（LK)",
+    "description": "长视频的单个分镜：时长、提示词、首尾帧与参考素材连线插座；输出接 MiniMaxH3分镜合成 节点。",
+    "inputs": {
+      "duration": { "name": "时长（秒）" },
+      "prompt": { "name": "提示词" },
+      "first_frame": { "name": "首帧" },
+      "last_frame": { "name": "尾帧" },
+      "ref_image_1": { "name": "图片 1" },
+      "ref_image_2": { "name": "图片 2" },
+      "ref_image_3": { "name": "图片 3" },
+      "ref_image_4": { "name": "图片 4" },
+      "ref_image_5": { "name": "图片 5" },
+      "ref_image_6": { "name": "图片 6" },
+      "ref_video_1": { "name": "视频 1" },
+      "ref_video_2": { "name": "视频 2" },
+      "ref_audio_1": { "name": "音频 1" },
+      "ref_audio_2": { "name": "音频 2" },
+      "ref_audio_3": { "name": "音频 3" }
+    },
+    "outputs": {
+      "0": {
+        "name": "shot",
+        "tooltip": "连接到 MiniMaxH3分镜合成 节点的 分镜 1-8 输入。"
+      }
+    }
+  },
   "LKH3Shots": {
-    "display_name": "MiniMaxH3分镜编排（LK)",
-    "description": "八个固定分镜板块与逐镜头连线点；与 MiniMaxH3模型设置 节点搭配使用，输出接长视频采样节点。",
+    "display_name": "MiniMaxH3分镜合成（LK)",
+    "description": "按连接顺序收集 MiniMaxH3分镜 节点，与模型设置一起组成长视频分镜计划，输出接长视频采样节点。",
     "inputs": {
       "settings": { "name": "模型设置" },
       "latent_continue": { "name": "潜空间续接" },
       "range_start": { "name": "运行范围·起" },
       "range_end": { "name": "运行范围·止" },
-      "conn_first_frame": { "name": "首帧（连线）" },
-      "conn_last_frame": { "name": "尾帧（连线）" },
-      "conn_image": { "name": "参考图片（连线）" },
-      "conn_video": { "name": "参考视频（连线）" },
-      "conn_audio": { "name": "参考音频（连线）" }
+      "shot_1": { "name": "分镜 1" },
+      "shot_2": { "name": "分镜 2" },
+      "shot_3": { "name": "分镜 3" },
+      "shot_4": { "name": "分镜 4" },
+      "shot_5": { "name": "分镜 5" },
+      "shot_6": { "name": "分镜 6" },
+      "shot_7": { "name": "分镜 7" },
+      "shot_8": { "name": "分镜 8" }
     },
     "outputs": {
       "0": {

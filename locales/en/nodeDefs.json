@@ -177,14 +177,49 @@
       }
     }
   },
+  "LKH3Shot": {
+    "display_name": "MiniMaxH3 Shot (LK)",
+    "description": "One long-video shot: duration, prompt, first/last frame and reference media sockets. Output connects to the MiniMaxH3 Shot Merger node.",
+    "inputs": {
+      "duration": { "name": "duration (s)" },
+      "prompt": { "name": "prompt" },
+      "first_frame": { "name": "first frame" },
+      "last_frame": { "name": "last frame" },
+      "ref_image_1": { "name": "image 1" },
+      "ref_image_2": { "name": "image 2" },
+      "ref_image_3": { "name": "image 3" },
+      "ref_image_4": { "name": "image 4" },
+      "ref_image_5": { "name": "image 5" },
+      "ref_image_6": { "name": "image 6" },
+      "ref_video_1": { "name": "video 1" },
+      "ref_video_2": { "name": "video 2" },
+      "ref_audio_1": { "name": "audio 1" },
+      "ref_audio_2": { "name": "audio 2" },
+      "ref_audio_3": { "name": "audio 3" }
+    },
+    "outputs": {
+      "0": {
+        "name": "shot",
+        "tooltip": "Connect to a MiniMaxH3 Shot Merger slot (shots 1-8)."
+      }
+    }
+  },
   "LKH3Shots": {
-    "display_name": "MiniMaxH3 Shot Storyboard (LK)",
-    "description": "Eight fixed shot blocks with per-shot link points; pairs with the Model Settings node. Output connects to the long video sampler.",
+    "display_name": "MiniMaxH3 Shot Merger (LK)",
+    "description": "Collects ordered MiniMaxH3 Shot nodes with the model settings and emits the segment plan for the sampler.",
     "inputs": {
       "settings": { "name": "settings" },
       "latent_continue": { "name": "latent continue" },
       "range_start": { "name": "run range start" },
-      "range_end": { "name": "run range end" }
+      "range_end": { "name": "run range end" },
+      "shot_1": { "name": "shot 1" },
+      "shot_2": { "name": "shot 2" },
+      "shot_3": { "name": "shot 3" },
+      "shot_4": { "name": "shot 4" },
+      "shot_5": { "name": "shot 5" },
+      "shot_6": { "name": "shot 6" },
+      "shot_7": { "name": "shot 7" },
+      "shot_8": { "name": "shot 8" }
     },
     "outputs": {
       "0": {

@@ -27,7 +27,7 @@ from .long_video import (
     MAX_SEGMENTS,
     SEGMENT_TYPE,
     build_multi_plan,
-    build_plan_from_shots,
+    build_plan_from_shot_nodes,
 )
 
 
@@ -621,12 +621,8 @@ class MiniMaxH3SettingsGH(io.ComfyNode):
 
 
 class MiniMaxH3ShotsGH(io.ComfyNode):
-    """Eight fixed shot blocks and their wiring in one orchestration node.
-
-    Receives global settings from :class:`MiniMaxH3SettingsGH` and emits the
-    segment plan consumed by the long-video sampler.  The eight blocks are
-    managed by the panel (segments_json); per-shot media link points live
-    inside each block.
+    """Collects ordered LKH3Shot nodes plus the global settings and emits the
+    segment plan consumed by the long-video sampler.  Pure schema — no panel.
     """
 
     @classmethod
@@ -640,30 +636,29 @@ class MiniMaxH3ShotsGH(io.ComfyNode):
             io.Boolean.Input(
                 "latent_continue",
                 default=True,
-                tooltip="Carry the previous segment's latent tail into the next shot.",
+                tooltip="Carry the previous shot's latent tail into the next shot.",
             ),
             io.Int.Input(
                 "range_start", default=1, min=1, max=MAX_SEGMENTS, step=1,
-                tooltip="First shot to run (1-based).",
+                tooltip="First shot to run (1-based, in connection order).",
             ),
             io.Int.Input(
                 "range_end", default=1, min=1, max=MAX_SEGMENTS, step=1,
                 tooltip="Last shot to run (inclusive).",
             ),
-            io.String.Input(
-                "segments_json",
-                default="",
-                optional=True,
-                extra_dict={"hidden": True},
-                tooltip="Shot table (managed by the panel; 8 fixed shots)",
-            ),
         ]
-        schema_inputs.extend(_connected_media_inputs())
+        for i in range(1, MAX_SEGMENTS + 1):
+            schema_inputs.append(io.Custom("LK_H3_SHOT").Input(
+                f"shot_{i}",
+                display_name=f"分镜 {i}",
+                optional=True,
+                tooltip=f"Shot {i} in the running order.",
+            ))
         return io.Schema(
             node_id="LKH3Shots",
-            display_name="MiniMaxH3分镜编排（LK)",
+            display_name="MiniMaxH3分镜合成（LK)",
             category=NODE_CATEGORY,
-            description="Eight fixed shot blocks with per-shot link points; pairs with MiniMaxH3模型设置.",
+            description="Collects ordered MiniMaxH3分镜 nodes with the model settings and emits the segment plan for the sampler.",
             inputs=schema_inputs,
             outputs=[
                 io.Custom(SEGMENT_TYPE).Output(
@@ -675,11 +670,90 @@ class MiniMaxH3ShotsGH(io.ComfyNode):
 
     @classmethod
     def execute(cls, settings, latent_continue=True, range_start=1, range_end=1,
-                segments_json="", conn_apply="all segments", **conn_media):
-        _, _, plan = build_plan_from_shots(
-            settings=settings, segments_json=segments_json,
+                shot_1=None, shot_2=None, shot_3=None, shot_4=None,
+                shot_5=None, shot_6=None, shot_7=None, shot_8=None):
+        shots = [shot for shot in (shot_1, shot_2, shot_3, shot_4,
+                                   shot_5, shot_6, shot_7, shot_8)
+                 if shot is not None]
+        _, _, plan = build_plan_from_shot_nodes(
+            settings=settings, shots=shots,
             latent_continue=latent_continue, range_start=range_start, range_end=range_end,
-            connected_media=_collect_connected_media(conn_media),
-            connected_apply=conn_apply,
         )
         return io.NodeOutput(plan)
+
+
+class MiniMaxH3ShotGH(io.ComfyNode):
+    """One shot of the long video: duration, prompt, reference media and
+    per-shot LoRA/RefMod rows (managed by the panel through ``shot_json``).
+    Output connects to the MiniMaxH3分镜合成 node.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LKH3Shot",
+            display_name="MiniMaxH3分镜（LK)",
+            category=NODE_CATEGORY,
+            description="One long-video shot. Media arrives through the link sockets; LoRA/RefMod rows are managed by the panel.",
+            inputs=[
+                io.Int.Input(
+                    "duration", default=5, min=2, max=30, step=1,
+                    tooltip="Shot length in seconds (snapped to the model's frame grid).",
+                ),
+                io.String.Input("prompt", multiline=True, dynamic_prompts=True, default=""),
+                io.Image.Input("first_frame", optional=True, tooltip="Optional first frame."),
+                io.Image.Input("last_frame", optional=True, tooltip="Optional last frame."),
+                io.Image.Input("ref_image_1", optional=True),
+                io.Image.Input("ref_image_2", optional=True),
+                io.Image.Input("ref_image_3", optional=True),
+                io.Image.Input("ref_image_4", optional=True),
+                io.Image.Input("ref_image_5", optional=True),
+                io.Image.Input("ref_image_6", optional=True),
+                io.Video.Input("ref_video_1", optional=True),
+                io.Video.Input("ref_video_2", optional=True),
+                io.Audio.Input("ref_audio_1", optional=True),
+                io.Audio.Input("ref_audio_2", optional=True),
+                io.Audio.Input("ref_audio_3", optional=True),
+                io.String.Input(
+                    "shot_json", default="", optional=True, extra_dict={"hidden": True},
+                    tooltip="Per-shot LoRA/RefMod rows (managed by the panel)",
+                ),
+            ],
+            outputs=[
+                io.Custom("LK_H3_SHOT").Output(
+                    display_name="shot",
+                    tooltip="Connect to a MiniMaxH3分镜合成 slot (分镜 1-8).",
+                ),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, duration, prompt, first_frame=None, last_frame=None,
+                ref_image_1=None, ref_image_2=None, ref_image_3=None,
+                ref_image_4=None, ref_image_5=None, ref_image_6=None,
+                ref_video_1=None, ref_video_2=None,
+                ref_audio_1=None, ref_audio_2=None, ref_audio_3=None,
+                shot_json=""):
+        mods, loras = [], []
+        try:
+            parsed = json.loads(shot_json) if isinstance(shot_json, str) and shot_json.strip() else {}
+            if isinstance(parsed, dict):
+                mods = parsed.get("mods") or []
+                loras = parsed.get("loras") or []
+        except (TypeError, ValueError):
+            pass
+        images = [t for t in (ref_image_1, ref_image_2, ref_image_3,
+                              ref_image_4, ref_image_5, ref_image_6) if t is not None]
+        videos = [t for t in (ref_video_1, ref_video_2) if t is not None]
+        audios = [t for t in (ref_audio_1, ref_audio_2, ref_audio_3) if t is not None]
+        return io.NodeOutput({
+            "duration": duration,
+            "prompt": prompt or "",
+            "first_frame": first_frame,
+            "last_frame": last_frame,
+            "images": images,
+            "videos": videos,
+            "audios": audios,
+            "mods": mods,
+            "loras": loras,
+        })
