@@ -1280,6 +1280,224 @@ class MiniMaxH3SegmentGuiderGH(io.ComfyNode):
         return io.NodeOutput(guider, contract_sampler, contract_sigmas)
 
 
+
+
+def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_steps,
+                        shift_video, shift_audio, sampler_name, scheduler, seed,
+                        seed_policy, cfg, release_clip, free_between_segments,
+                        audio_policy="keep", clip=None, video_vae=None,
+                        audio_vae=None, external_sigmas=None, external_noise=None,
+                        external_sampler=None):
+    """Segmented HD second pass: refine an upscaled whole-film AV latent one
+    shot at a time.
+
+    This is the long-video equivalent of the T8 two-pass HIGH stage.  The
+    first pass already made the film continuous, so there is no carry here —
+    each shot's span is sliced from the upscaled latent by ``lk_layout``,
+    re-conditioned at the UPSCALED canvas (references re-encoded in HD, the
+    HIGH-conditioning equivalent), sampled with the per-shot LoRA set and the
+    refine schedule, and the spans are concatenated back.  With
+    ``audio_policy="keep"`` the first pass's audio is composited back
+    verbatim (the T8 ``legacy_policy`` equivalent) — audio is
+    resolution-independent, so the second pass must not rewrite it.
+
+    The refine schedule is computed internally as the tail of the full
+    ``base_steps`` schedule split at ``coarse_steps`` (9/4 -> 5 refine steps,
+    matching the T8 ParityPlan) when no external sigmas are wired.
+    """
+    plan = segments
+    if not isinstance(plan, dict) or not plan.get("segments"):
+        raise ValueError("Connect the storyboard node's 'segments' output to the refine node.")
+    if not getattr(refined_latent.get("samples", None), "is_nested", False):
+        raise ValueError("二跑精修需要放大后的嵌套 AV 潜空间（来自 AV潜空间放大 / 学习型放大器）。")
+    video, audio = nested_av_parts(refined_latent)
+    layout = refined_latent.get("lk_layout") or {}
+    entries = layout.get("segments") or []
+    start = int(plan["range"]["start"]) - 1
+    end = int(plan["range"]["end"]) - 1
+    span_count = end - start + 1
+    if len(entries) < span_count:
+        raise ValueError(
+            f"放大后的潜空间布局只有 {len(entries)} 个镜头段，但计划范围需要 {span_count} 段——"
+            "av_latent 必须来自同一分段计划的一采输出放大。"
+        )
+
+    # Per-shot conditioning must be built at the UPSCALED canvas so the
+    # reference images re-encode in HD (the HIGH-conditioning equivalent).
+    height = int(video.shape[3]) * 16
+    width = int(video.shape[4]) * 16
+    plan = dict(plan)
+    plan["width"] = width
+    plan["height"] = height
+    if clip is not None:
+        plan["clip"] = clip
+    if video_vae is not None:
+        plan["video_vae"] = video_vae
+    if audio_vae is not None:
+        plan["audio_vae"] = audio_vae
+    if external_noise is not None:
+        # comfy-core noise objects bake their own seed; honor it as the base
+        # seed for the per-shot noise split instead of the widget value.
+        obj_seed = getattr(external_noise, "seed", None)
+        if isinstance(obj_seed, int):
+            seed = obj_seed
+
+    if external_sigmas is None:
+        # Self-computed refine schedule: the full base schedule split at the
+        # coarse cutoff (9/4 -> the remaining 5 sigmas down to 0), matching
+        # the T8 ParityPlan without the external contract/plan nodes.
+        coarse = max(1, min(int(coarse_steps), int(base_steps) - 1))
+        _patched, _sampler, full_schedule = setup_dual_clock_sampling_gh(
+            model, refined_latent, int(base_steps), float(shift_video),
+            float(shift_audio), sampler_name or DEFAULT_SAMPLER_NAME,
+            scheduler or DEFAULT_SCHEDULER_NAME,
+        )
+        external_sigmas = full_schedule[int(coarse):]
+
+    lora_cache = _lora_cache()
+    clip_obj = plan.get("clip")
+    progress = None
+    if getattr(comfy.utils, "PROGRESS_BAR_ENABLED", True):
+        progress = comfy.utils.ProgressBar(max(1, int(base_steps) - max(1, int(coarse_steps))) * max(1, span_count))
+    collected = []
+    audio_mode = None
+    first_positive = None
+    previous_samples = None
+
+    for index in range(start, end + 1):
+        entry = entries[index - start]
+        v0, vt = int(entry["video_offset"]), int(entry["video_tokens"])
+        a0, at = int(entry["audio_offset"]), int(entry["audio_steps"])
+        seg_video = video[..., v0:v0 + vt, :, :]
+        seg_audio = audio[..., a0:a0 + at]
+
+        if clip_obj is None:
+            clip_obj = _load_clip(plan)
+        bundle = build_segment_bundle(
+            plan, index, first_frame_override=None, clip=clip_obj,
+            connected=(plan.get("connected_by_segment") or {}).get(index + 1),
+        )
+        if first_positive is None:
+            first_positive = bundle["positive"]
+        if release_clip and clip_obj is not None:
+            _release_clip(plan, clip_obj)
+            clip_obj = None
+
+        # Swap the template's samples for this shot's slice of the upscaled
+        # film; the template's metadata (audio mode, keyframe bookkeeping)
+        # stays so the sampler contract sees a consistent latent.
+        seg_latent = dict(bundle["av_latent"])
+        seg_latent["samples"] = comfy.nested_tensor.NestedTensor((seg_video, seg_audio))
+
+        # Carry the previous shot's refined tail as an EXTENDED window head
+        # ([prev tail | own span], head locked at denoise-mask 0).  Unlike
+        # pass 1's overwrite-style carry this must not consume the shot's own
+        # tokens - the upscaled layout's span sizes are fixed and the assembled
+        # film has to match them 1:1.  Per-shot windows otherwise refine blind,
+        # and a high refine sigma re-asserts each shot's own prompt, breaking
+        # the cross-shot continuity pass 1 established.
+        carry_t = carry_a = 0
+        if previous_samples is not None:
+            prev_video, prev_audio = previous_samples.unbind()
+            tokens = min(CARRY_TOKENS, int(prev_video.shape[2]))
+            audio_steps = min(CARRY_AUDIO_STEPS, int(prev_audio.shape[-1])) if audio_policy != "keep" else 0
+            if tokens > 0:
+                window_video = torch.cat(
+                    [prev_video[..., -tokens:, :, :].to(seg_video), seg_video], dim=2
+                )
+                window_audio = (
+                    torch.cat([prev_audio[..., -audio_steps:].to(seg_audio), seg_audio], dim=-1)
+                    if audio_steps > 0 else seg_audio
+                )
+                video_mask = torch.ones(
+                    (1, 1, window_video.shape[2], window_video.shape[3], window_video.shape[4]),
+                    device=window_video.device, dtype=torch.float32,
+                )
+                video_mask[..., :tokens, :, :] = 0.0
+                audio_mask = torch.ones(
+                    (1, 1, window_audio.shape[2], window_audio.shape[3]),
+                    device=window_audio.device, dtype=torch.float32,
+                )
+                if audio_steps > 0:
+                    audio_mask[..., :audio_steps] = 0.0
+                seg_latent = dict(seg_latent)
+                seg_latent["samples"] = comfy.nested_tensor.NestedTensor((window_video, window_audio))
+                seg_latent["noise_mask"] = comfy.nested_tensor.NestedTensor((video_mask, audio_mask))
+                carry_t, carry_a = tokens, audio_steps
+        bundle = dict(bundle)
+        bundle["av_latent"] = seg_latent
+
+        segment = plan["segments"][index]
+        seg_seed = int(seed) if seed_policy == "fixed" else int(seed) + (index - start)
+        seg_model = _apply_model_loras(model, segment.get("loras") or [], lora_cache)
+        samples = _sample_bundle(
+            seg_model, bundle,
+            steps=int(base_steps), shift_video=float(shift_video), shift_audio=float(shift_audio),
+            sampler_name=sampler_name, scheduler=scheduler, seed=seg_seed, cfg=float(cfg),
+            progress=progress,
+            external_noise=external_noise, external_sigmas=external_sigmas,
+            external_sampler=external_sampler,
+        )
+        out_video, out_audio = nested_av_parts(samples)
+        if audio_mode is None:
+            audio_mode = samples.get("gh_h3_audio_mode") or plan.get("audio_mode") or "native"
+        if audio_policy == "keep":
+            # Composite the first pass's audio back verbatim: the refine pass
+            # must not rewrite already-generated speech/ambience.
+            out_audio = seg_audio
+        if carry_t > 0:
+            # Trim the duplicated carried span so the assembled film keeps the
+            # upscaled layout's offsets 1:1.
+            out_video = out_video[..., carry_t:, :, :]
+            out_audio = out_audio[..., carry_a:]
+        previous_samples = samples["samples"]
+        collected.append({
+            "segment": index + 1,
+            "video": out_video.detach().to("cpu"),
+            "audio": out_audio.detach().to("cpu"),
+        })
+        del samples, seg_model
+        if free_between_segments:
+            try:
+                import comfy.model_management as model_management
+                model_management.soft_empty_cache()
+            except Exception:
+                pass
+
+    out_video = torch.cat([item["video"] for item in collected], dim=2)
+    out_audio = torch.cat([item["audio"] for item in collected], dim=-1)
+    out_entries = []
+    video_offset = 0
+    audio_offset = 0
+    for item, entry in zip(collected, entries[start:end + 1]):
+        tokens = int(item["video"].shape[2])
+        out_entries.append({
+            "segment": item["segment"],
+            "video_offset": video_offset,
+            "video_tokens": tokens,
+            "audio_offset": audio_offset,
+            "audio_steps": int(item["audio"].shape[-1]),
+            "frames": _pixel_frames_from_latent_t(tokens),
+        })
+        video_offset += tokens
+        audio_offset += int(item["audio"].shape[-1])
+    out = {
+        "samples": comfy.nested_tensor.NestedTensor((out_video, out_audio)),
+        "gh_h3_audio_mode": audio_mode or "native",
+        "lk_layout": {
+            "version": 1,
+            "pass": "second",
+            "latent_continue": bool(plan.get("latent_continue", True)),
+            "range": {"start": start + 1, "end": end + 1},
+            "video_hw": [int(out_video.shape[3]), int(out_video.shape[4])],
+            "segments": out_entries,
+        },
+    }
+    return out, first_positive
+
+
+
+
 class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
     @classmethod
     def define_schema(cls):
