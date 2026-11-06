@@ -42,6 +42,7 @@ from .gh import long_video as _gh_long_video
 from .gh import latent_upscale as _gh_latent_upscale
 from .gh import sampling as _gh_sampling
 from .gh import audio_ops as _gh_audio_ops
+from .gh import reference_tools as _gh_reference_tools
 from .gh import prompt_optimizer as _gh_prompt_optimizer  # noqa: F401  (registers prompt-optimizer routes)
 
 NODE_CLASS_MAPPINGS = {
@@ -57,6 +58,7 @@ NODE_CLASS_MAPPINGS = {
     "LKH3SegmentGuider": _gh_long_video.MiniMaxH3SegmentGuiderGH,
     "LKH3AVTemplate": _gh_long_video.MiniMaxH3AVTemplateGH,
     "LKH3RefineSegments": _gh_long_video.MiniMaxH3RefineSegmentsGH,
+    "LKH3ReferenceFocus": _gh_reference_tools.MiniMaxH3ReferenceFocusGH,
     "LKH3FilmPrompt": _gh_nodes.MiniMaxH3FilmPromptGH,
 }
 
@@ -73,6 +75,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LKH3SegmentGuider": "MiniMax-H3 分段引导（LK）",
     "LKH3AVTemplate": "MiniMax-H3 空白AV模板（LK）",
     "LKH3RefineSegments": "MiniMax-H3 二跑分段精修（LK）",
+    "LKH3ReferenceFocus": "MiniMax-H3 参考聚焦（LK）",
     "LKH3FilmPrompt": "MiniMaxH3全片提示词设置（LK）",
 }
 

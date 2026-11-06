@@ -1041,7 +1041,13 @@ def _sample_bundle(model, bundle, *, steps, shift_video, shift_audio,
     guider = _make_guider(patched_model, bundle["positive"], cfg)
     samples = av_latent["samples"]
     if external_noise is not None:
-        noise = external_noise.generate_noise(samples, int(seed) & 0x7FFFFFFFFFFFFFFF)
+        try:
+            noise = external_noise.generate_noise(samples, int(seed) & 0x7FFFFFFFFFFFFFFF)
+        except TypeError:
+            # comfy-core noise objects (Noise_RandomNoise) bake their own seed
+            # and only accept the latent — fall back to this pack's per-seed
+            # generator so every shot still gets its own noise.
+            noise = _make_noise(samples, seed)
     else:
         noise = _make_noise(samples, seed)
     disable_pbar = not getattr(comfy.utils, "PROGRESS_BAR_ENABLED", True)
@@ -1649,6 +1655,12 @@ def run_refine_segments(model, segments, refined_latent, *, steps, shift_video,
         plan["video_vae"] = video_vae
     if audio_vae is not None:
         plan["audio_vae"] = audio_vae
+    if external_noise is not None:
+        # comfy-core noise objects bake their own seed; honor it as the base
+        # seed for the per-shot noise split instead of the widget value.
+        obj_seed = getattr(external_noise, "seed", None)
+        if isinstance(obj_seed, int):
+            seed = obj_seed
 
     lora_cache = _lora_cache()
     clip_obj = plan.get("clip")

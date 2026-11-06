@@ -604,5 +604,40 @@
         "name": "conditioning"
       }
     }
+  },
+  "LKH3ReferenceFocus": {
+    "display_name": "MiniMax-H3 Reference Focus (LK)",
+    "description": "Preprocesses a reference photo: face detection, tight identity crops, identity sheet packing.",
+    "inputs": {
+      "image": {
+        "name": "image"
+      },
+      "mode": {
+        "name": "mode",
+        "options": {
+          "face_sheet": "Face sheet",
+          "face_main": "Main face",
+          "center_square": "Center square",
+          "passthrough": "Passthrough"
+        }
+      },
+      "faces": {
+        "name": "faces"
+      },
+      "margin": {
+        "name": "margin"
+      },
+      "cell": {
+        "name": "cell"
+      },
+      "confidence": {
+        "name": "confidence"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "image"
+      }
+    }
   }
 }

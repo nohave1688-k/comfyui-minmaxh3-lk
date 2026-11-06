@@ -660,5 +660,41 @@
         "tooltip": "首镜的正向条件（高清画布重编码）。"
       }
     }
+  },
+  "LKH3ReferenceFocus": {
+    "display_name": "MiniMax-H3 参考聚焦（LK）",
+    "description": "参考照片预处理：人脸检测 → 紧凑身份裁切 → 身份表拼接，作为单个 <Picture n> 打包。检测器为内置 230KB YuNet 模型，任何失败都退化为中心裁切。",
+    "inputs": {
+      "image": {
+        "name": "参考照片"
+      },
+      "mode": {
+        "name": "模式",
+        "options": {
+          "face_sheet": "人脸身份表",
+          "face_main": "主脸特写",
+          "center_square": "中心方裁",
+          "passthrough": "原样"
+        }
+      },
+      "faces": {
+        "name": "人脸数上限"
+      },
+      "margin": {
+        "name": "扩边系数"
+      },
+      "cell": {
+        "name": "单元格边长"
+      },
+      "confidence": {
+        "name": "检测置信度"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "image",
+        "tooltip": "预处理后的参考图 — 接分镜节点的 参考图 插座。"
+      }
+    }
   }
 }
