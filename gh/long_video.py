@@ -1571,6 +1571,7 @@ def run_refine_segments(model, segments, refined_latent, *, steps, shift_video,
     collected = []
     audio_mode = None
     first_positive = None
+    previous_samples = None
 
     for index in range(start, end + 1):
         entry = entries[index - start]
@@ -1596,6 +1597,42 @@ def run_refine_segments(model, segments, refined_latent, *, steps, shift_video,
         # stays so the sampler contract sees a consistent latent.
         seg_latent = dict(bundle["av_latent"])
         seg_latent["samples"] = comfy.nested_tensor.NestedTensor((seg_video, seg_audio))
+
+        # Carry the previous shot's refined tail as an EXTENDED window head
+        # ([prev tail | own span], head locked at denoise-mask 0).  Unlike
+        # pass 1's overwrite-style carry this must not consume the shot's own
+        # tokens - the upscaled layout's span sizes are fixed and the assembled
+        # film has to match them 1:1.  Per-shot windows otherwise refine blind,
+        # and a high refine sigma re-asserts each shot's own prompt, breaking
+        # the cross-shot continuity pass 1 established.
+        carry_t = carry_a = 0
+        if previous_samples is not None:
+            prev_video, prev_audio = previous_samples.unbind()
+            tokens = min(CARRY_TOKENS, int(prev_video.shape[2]))
+            audio_steps = min(CARRY_AUDIO_STEPS, int(prev_audio.shape[-1])) if audio_policy != "keep" else 0
+            if tokens > 0:
+                window_video = torch.cat(
+                    [prev_video[..., -tokens:, :, :].to(seg_video), seg_video], dim=2
+                )
+                window_audio = (
+                    torch.cat([prev_audio[..., -audio_steps:].to(seg_audio), seg_audio], dim=-1)
+                    if audio_steps > 0 else seg_audio
+                )
+                video_mask = torch.ones(
+                    (1, 1, window_video.shape[2], window_video.shape[3], window_video.shape[4]),
+                    device=window_video.device, dtype=torch.float32,
+                )
+                video_mask[..., :tokens, :, :] = 0.0
+                audio_mask = torch.ones(
+                    (1, 1, window_audio.shape[2], window_audio.shape[3]),
+                    device=window_audio.device, dtype=torch.float32,
+                )
+                if audio_steps > 0:
+                    audio_mask[..., :audio_steps] = 0.0
+                seg_latent = dict(seg_latent)
+                seg_latent["samples"] = comfy.nested_tensor.NestedTensor((window_video, window_audio))
+                seg_latent["noise_mask"] = comfy.nested_tensor.NestedTensor((video_mask, audio_mask))
+                carry_t, carry_a = tokens, audio_steps
         bundle = dict(bundle)
         bundle["av_latent"] = seg_latent
 
@@ -1617,6 +1654,12 @@ def run_refine_segments(model, segments, refined_latent, *, steps, shift_video,
             # Composite the first pass's audio back verbatim: the refine pass
             # must not rewrite already-generated speech/ambience.
             out_audio = seg_audio
+        if carry_t > 0:
+            # Trim the duplicated carried span so the assembled film keeps the
+            # upscaled layout's offsets 1:1.
+            out_video = out_video[..., carry_t:, :, :]
+            out_audio = out_audio[..., carry_a:]
+        previous_samples = samples["samples"]
         collected.append({
             "segment": index + 1,
             "video": out_video.detach().to("cpu"),
