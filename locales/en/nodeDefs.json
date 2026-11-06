@@ -215,7 +215,7 @@
   },
   "LKH3Settings": {
     "display_name": "MiniMaxH3 Model Settings (LK)",
-    "description": "Shared MiniMax H3 model/canvas settings; connect to the shots node.",
+    "description": "Model selection only: CLIP and VAE link outputs for the samplers and the AV decode node. Canvas/audio/ref-size knobs live on the Whole-Film Prompt node.",
     "outputs": {
       "0": {
         "name": "settings",

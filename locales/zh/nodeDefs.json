@@ -213,7 +213,7 @@
   },
   "LKH3Settings": {
     "display_name": "MiniMaxH3模型设置（LK)",
-    "description": "全局模型与画布设置；输出连接到分镜编排节点的模型设置输入。",
+    "description": "模型选择节点：CLIP 与双 VAE 连线输出，供采样器/分段引导/AV解码 使用。画布、音频模式、参考尺寸等全片级旋钮在「全片提示词设置」节点上。",
     "inputs": {
       "clip_name": {
         "name": "CLIP模型"

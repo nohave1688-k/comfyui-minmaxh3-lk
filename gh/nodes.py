@@ -613,8 +613,10 @@ class MiniMaxH3FilmPromptGH(io.ComfyNode):
 class MiniMaxH3SettingsGH(io.ComfyNode):
     """Model selection for the long-video chain: CLIP/VAE as links.
 
-    Canvas and audio knobs moved to :class:`MiniMaxH3FilmPromptGH` (they are
-    film-level, not model-level); this node keeps model selection only.
+    Canvas and audio knobs live on :class:`MiniMaxH3FilmPromptGH` (they are
+    film-level, not model-level).  The four legacy knobs below stay as hidden
+    widgets purely so old workflows' saved values still serialize for the
+    collector's no-film-node fallback path.
     """
 
     @classmethod
@@ -623,7 +625,10 @@ class MiniMaxH3SettingsGH(io.ComfyNode):
             node_id="LKH3Settings",
             display_name="MiniMaxH3模型设置（LK)",
             category=NODE_CATEGORY,
-            description="Shared MiniMax H3 model/canvas settings; connect to the shots node.",
+            description=(
+                "Model selection only — CLIP/VAE as links for the samplers and the "
+                "AV 解码 node.  Canvas/audio/ref-size knobs live on the 全片提示词设置 node."
+            ),
             inputs=[
                 io.Combo.Input(
                     "clip_name",
@@ -640,17 +645,23 @@ class MiniMaxH3SettingsGH(io.ComfyNode):
                     options=folder_paths.get_filename_list("vae"),
                     default=_default_model(folder_paths.get_filename_list("vae"), DEFAULT_AUDIO_VAE),
                 ),
-                io.Combo.Input("aspect", options=list(ASPECTS), default="adaptive"),
-                io.Float.Input("megapixels", default=0.5, min=0.2, max=2.0, step=0.1, round=0.1),
+                # Legacy fallbacks (hidden): the film-level knobs moved to the
+                # 全片提示词设置 node.  Keep them serializing so workflows saved
+                # before the split still restore their canvas/audio values for
+                # the collector's no-film-node fallback path.
+                io.Combo.Input("aspect", options=list(ASPECTS), default="adaptive", extra_dict={"hidden": True}),
+                io.Float.Input("megapixels", default=0.5, min=0.2, max=2.0, step=0.1, round=0.1, extra_dict={"hidden": True}),
                 io.Combo.Input(
                     "ref_image_size",
                     options=["match", "1.2x", "1.5x", "2x", "max"],
                     default="match",
+                    extra_dict={"hidden": True},
                 ),
                 io.Combo.Input(
                     "audio_mode",
                     options=["lock_source", "reference_only", "native"],
                     default="lock_source",
+                    extra_dict={"hidden": True},
                 ),
             ],
             outputs=[
