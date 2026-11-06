@@ -1,41 +1,23 @@
-"""ComfyUI MiniMax H3 Long Video — the long-video focused successor pack.
+"""ComfyUI MiniMax H3 Long Video (LK) — segmented multi-shot audio-video
+generation for the MiniMax H3 hybrid Ref2VA model.
 
-Slimmed-down rebuild of ComfyUI-MiniMaxH3-lanxi (the GH integration + RefMod
-merge) that keeps only the long-video core:
+Node roster:
 
-* ``LKH3Studio`` — the segment panel / conditioning builder (1-8
-  segments, per-segment prompts, first/last frames, picture/video/audio
-  references, RefMod rows, per-segment LoRA slots, and connectable media
-  sockets: drag upstream links onto the panel buttons).
-* ``LKH3LongVideo`` — the segmented sampler: per-segment LoRA, latent
-  continuation across seams, dual-clock sampling.  It outputs the whole-video
-  packed AV latent plus the positive conditioning; decoding and HD second
-  passes are composed downstream from standard sampling primitives.
-* ``LKH3AVUpscale`` — spatially upscales the video part of the packed AV
-  latent (audio/layout pass through, per-shot chunks to bound VRAM) for the
-  HD second-pass chain.
-* ``LKH3DualClockSampler`` — the T8-style sampler contract: patches the model
-  with the AV dual-clock / FLOW_AV model sampling and emits MODEL / SAMPLER /
-  SIGMAS for comfy-core BasicGuider + SamplerCustomAdvanced chains.
-* ``LKH3SegmentGuider`` — the T8-style GUIDER for the first pass: owns the
-  segmented loop (per-shot conditioning + LoRA, latent continuation) while
-  sampler/sigmas/seed/cfg come from the standard primitives.
-* ``LKH3RefineSegments`` — the segmented HD second pass: refines the
-  upscaled whole-film latent one shot at a time (per-shot HD conditioning,
-  external refine schedule, first-pass audio kept verbatim).
-* ``LKH3ReferenceFocus`` — reference-photo preprocessing (YuNet face crops
+* LKH3Composer — one-stop film composer: whole-film prompt, model
+  selection, shot collection, and the empty-AV template output.
+* LKH3Shot — one shot: duration, prompt, reference media, LoRA/RefMod rows.
+* LKH3SegmentGuider — first pass: owns the segmented loop (per-shot
+  conditioning + LoRA, latent continuation) and emits its own SAMPLER/SIGMAS.
+* LKH3RefineSegments — second pass: refines the upscaled whole-film latent
+  one shot at a time (per-shot HD conditioning, internal refine schedule split
+  base/coarse, first-pass audio kept verbatim).
+* LKH3AVUpscale — per-shot spatial upscale of the packed AV latent.
+* LKH3ReferenceFocus — reference-photo preprocessing (YuNet face crops
   into an identity sheet) for stronger identity adherence.
-* ``LKH3Composer`` — one-stop film composer (whole-film prompt + model
-  selection + shot collection + empty-AV template output).
-* ``LKH3AVDecode`` — decodes the packed AV latent back to frames + audio.
+* LKH3AVDecode — decodes the packed AV latent back to frames + audio.
 
-Removed from the lanxi pack during the rebuild: the single-mode pipeline
-(adapter + standalone dual-clock sampler + AV decode), the V1 dual-track node
-registration and the 16 never-registered RefMod graph nodes (the RefMod
-*library* remains as the panel's backing store under ``models/refmods/``).
-
-Registered purely through ``NODE_CLASS_MAPPINGS``; the classes are V3
-``io.ComfyNode`` implementations that ComfyUI executes natively.
+The plan socket type is LANXI_H3_SEGMENTS on purpose: plans stay
+interchangeable with the predecessor pack's long-video samplers.
 """
 
 from __future__ import annotations
@@ -51,12 +33,8 @@ from .gh import reference_tools as _gh_reference_tools
 from .gh import prompt_optimizer as _gh_prompt_optimizer  # noqa: F401  (registers prompt-optimizer routes)
 
 NODE_CLASS_MAPPINGS = {
-    "LKH3Studio": _gh_nodes.MiniMaxH3IntegrationGH,
     "LKH3Shot": _gh_nodes.MiniMaxH3ShotGH,
-    "LKH3SamplerSettings": _gh_long_video.MiniMaxH3SamplerSettingsGH,
-    "LKH3LongVideo": _gh_long_video.MiniMaxH3LongVideoRunnerGH,
     "LKH3AVUpscale": _gh_latent_upscale.MiniMaxH3AVUpscaleGH,
-    "LKH3DualClockSampler": _gh_sampling.MiniMaxH3DualClockSamplerGH,
     "LKH3AVDecode": _gh_audio_ops.MiniMaxH3AVDecodeGH,
     "LKH3SegmentGuider": _gh_long_video.MiniMaxH3SegmentGuiderGH,
     "LKH3RefineSegments": _gh_long_video.MiniMaxH3RefineSegmentsGH,
@@ -65,23 +43,13 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "LKH3Studio": "MiniMaxH3长视频操作台（LK)",
-    # REMOVED: LKH3{gone}
-    # "LKH3{gone}"模型设置（LK)",
     "LKH3Shot": "MiniMaxH3分镜（LK）",
-    # REMOVED: LKH3{gone}
-    # "LKH3{gone}"分镜合成（LK）",
-    "LKH3SamplerSettings": "MiniMaxH3采样设置（LK）",
-    "LKH3LongVideo": "MiniMax-H3 长视频分段采样（LK）",
     "LKH3AVUpscale": "MiniMax-H3 AV潜空间放大（LK）",
-    "LKH3DualClockSampler": "MiniMax-H3 双钟采样（LK）",
     "LKH3AVDecode": "MiniMax-H3 AV解码（LK）",
     "LKH3SegmentGuider": "MiniMax-H3 分段引导（LK）",
     "LKH3RefineSegments": "MiniMax-H3 二跑分段精修（LK）",
     "LKH3ReferenceFocus": "MiniMax-H3 参考聚焦（LK）",
     "LKH3Composer": "MiniMaxH3 长视频编排（LK）",
-    # REMOVED: LKH3{gone}
-    # "LKH3{gone}"全片提示词设置（LK）",
 }
 
 # LoRA list for the per-segment LoRA slots.  ``folder_paths`` is resolved at

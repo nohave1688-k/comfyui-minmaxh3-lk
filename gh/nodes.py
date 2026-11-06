@@ -27,7 +27,6 @@ from .long_video import (
     MAX_SEGMENTS,
     SEGMENT_TYPE,
     build_empty_plan_latent,
-    build_multi_plan,
     build_plan_from_shot_nodes,
 )
 
@@ -428,132 +427,6 @@ def _collect_connected_media(conn_media):
     return collected
 
 
-class MiniMaxH3IntegrationGH(io.ComfyNode):
-    @classmethod
-    def define_schema(cls):
-        schema_inputs = [
-            _hidden_combo("main_mode", ["text_keyframes", "all_reference", "multi_segment"], "text_keyframes"),
-                io.Combo.Input(
-                    "clip_name",
-                    options=folder_paths.get_filename_list("text_encoders"),
-                    default=_default_model(folder_paths.get_filename_list("text_encoders"), DEFAULT_CLIP),
-                ),
-                io.Combo.Input(
-                    "video_vae_name",
-                    options=folder_paths.get_filename_list("vae"),
-                    default=_default_model(folder_paths.get_filename_list("vae"), DEFAULT_VIDEO_VAE),
-                ),
-                io.Combo.Input(
-                    "audio_vae_name",
-                    options=folder_paths.get_filename_list("vae"),
-                    default=_default_model(folder_paths.get_filename_list("vae"), DEFAULT_AUDIO_VAE),
-                ),
-                io.Combo.Input("aspect", options=list(ASPECTS), default="adaptive"),
-                io.Float.Input("megapixels", default=0.5, min=0.2, max=2.0, step=0.1, round=0.1),
-                io.Combo.Input(
-                    "ref_image_size",
-                    options=["match", "1.2x", "1.5x", "2x", "max"],
-                    default="match",
-                ),
-                io.Combo.Input(
-                    "audio_mode",
-                    options=["lock_source", "reference_only", "native"],
-                    default="lock_source",
-                ),
-                io.String.Input("prompt", multiline=True, dynamic_prompts=True, default="", extra_dict={"hidden": True}),
-                _uploaded_media("first_frame", tooltip="Optional first frame", hidden=True),
-                _uploaded_media("last_frame", tooltip="Optional last frame", hidden=True),
-                _uploaded_media("hybrid_audio", tooltip="Optional audio for keyframe Hybrid", hidden=True),
-                _uploaded_media("ref_image_1", hidden=True),
-                _uploaded_media("ref_image_2", hidden=True),
-                _uploaded_media("ref_image_3", hidden=True),
-                _uploaded_media("ref_image_4", hidden=True),
-                _uploaded_media("ref_image_5", hidden=True),
-                _uploaded_media("ref_image_6", hidden=True),
-                _uploaded_media("ref_image_7", hidden=True),
-                _uploaded_media("ref_image_8", hidden=True),
-                _uploaded_media("ref_image_9", hidden=True),
-                _uploaded_media("ref_video_1", hidden=True),
-                _uploaded_media("ref_video_2", hidden=True),
-                _uploaded_media("ref_video_3", hidden=True),
-                _uploaded_media("ref_audio_1", hidden=True),
-                _uploaded_media("ref_audio_2", hidden=True),
-                _uploaded_media("ref_audio_3", hidden=True),
-                _hidden_combo("task_type", ["auto", "t2va", "i2va", "l2va", "fl2va", "ref2va", "hybrid"], "auto"),
-                _hidden_float("audio_denoise_strength", 0.0, 0.0, 1.0, 0.01, 0.01),
-                # Match T8: 1 selects the first audio; 0 disables remapping.
-                _hidden_int("drive_audio_ordinal", 1, 0, 6),
-                _hidden_boolean("strict_prompt_tags", True),
-                # Keep this last so adding persistence does not shift legacy
-                # widgets_values positions for any existing input.
-                io.String.Input("gh_state_json", default="", optional=True, extra_dict={"hidden": True}),
-                # Ordered RefMod rows written by the panel.  mod_1 -> <Video 1>,
-                # mod_2 -> <Video 2>, ...; the panel is the source of truth and
-                # this hidden widget is what gets serialized into the prompt.
-                io.String.Input(
-                    "refmods_json",
-                    default="",
-                    optional=True,
-                    extra_dict={"hidden": True},
-                    tooltip="Ordered RefMod list bound to <Video n> tags (managed by the panel)",
-                ),
-                io.String.Input(
-                    "segments_json",
-                    default="",
-                    optional=True,
-                    extra_dict={"hidden": True},
-                    tooltip="Long-video segment table (managed by the panel; 1-8 segments)",
-                ),
-                # Keep new inputs after every legacy widget so old workflow
-                # widget-value positions remain unchanged.
-                io.String.Input(
-                    "prompt_override",
-                    display_name="Prompt",
-                    optional=True,
-                    force_input=True,
-                    tooltip="Optional upstream prompt; overrides the local prompt editor when connected",
-                ),
-        ]
-        # Per-segment connectable media sockets, appended after every legacy
-        # widget so existing workflow widget positions remain unchanged.
-        schema_inputs.extend(_connected_media_inputs())
-        # The adapter stays the only expansion node for the private
-        # "MiniMax" socket; the merged RefMod list is exposed separately so
-        # it can also drive Apply/TextEncode/Save nodes.
-        return io.Schema(
-            node_id="LKH3Studio",
-            display_name="MiniMaxH3长视频操作台（LK)",
-            category=NODE_CATEGORY,
-            description="Integrated MiniMax H3 conditioning input. The diffusion model remains external.",
-            inputs=schema_inputs,
-            outputs=[
-                io.Custom(SEGMENT_TYPE).Output(
-                    display_name="segments",
-                    tooltip="Long-video segment plan; connect to the long-video sampler",
-                ),
-            ],
-        )
-
-    @classmethod
-    def execute(cls, main_mode, aspect, megapixels, clip_name, video_vae_name, audio_vae_name,
-                prompt, first_frame, last_frame, hybrid_audio, ref_image_1, ref_image_2, ref_image_3,
-                ref_image_4, ref_image_5, ref_image_6, ref_image_7, ref_image_8, ref_image_9,
-                ref_video_1, ref_video_2, ref_video_3, ref_audio_1, ref_audio_2, ref_audio_3,
-                task_type, audio_mode, audio_denoise_strength,
-                drive_audio_ordinal, strict_prompt_tags, ref_image_size,
-                gh_state_json="", refmods_json="", segments_json="", prompt_override=None,
-                conn_apply="all segments", **conn_media):
-        preview, plan_mods, plan = build_multi_plan(
-            aspect=aspect, megapixels=megapixels, segments_json=segments_json,
-            clip_name=clip_name, video_vae_name=video_vae_name,
-            audio_vae_name=audio_vae_name, audio_mode=audio_mode,
-            audio_denoise_strength=audio_denoise_strength,
-            strict_prompt_tags=strict_prompt_tags, ref_image_size=ref_image_size,
-            connected_media=_collect_connected_media(conn_media),
-            connected_apply=conn_apply,
-        )
-        return io.NodeOutput(plan)
-
 class MiniMaxH3ComposerGH(io.ComfyNode):
     """One-stop film composer: whole-film prompt + model selection + shot
     collection + the empty-AV template, merged into a single node.
@@ -625,7 +498,7 @@ class MiniMaxH3ComposerGH(io.ComfyNode):
             ))
         return io.Schema(
             node_id="LKH3Composer",
-            display_name="MiniMaxH3 长视频编排（LK)",
+            display_name="MiniMaxH3 长视频编排（LK）",
             category=NODE_CATEGORY,
             description=(
                 "One-stop long-video composer: whole-film prompt, model selection, "
@@ -695,7 +568,7 @@ class MiniMaxH3ShotGH(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="LKH3Shot",
-            display_name="MiniMaxH3分镜（LK)",
+            display_name="MiniMaxH3分镜（LK）",
             category=NODE_CATEGORY,
             description="One long-video shot. Media arrives through the link sockets; LoRA/RefMod rows are managed by the panel.",
             inputs=[

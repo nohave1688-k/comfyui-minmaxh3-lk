@@ -1946,11 +1946,13 @@ app.registerExtension({
 });
 
 const LK_TITLES = {
-    LKH3Studio: "MiniMaxH3长视频操作台（lanxi)",
-    LKH3Settings: "MiniMaxH3模型设置（lanxi）",
-    LKH3Shot: "MiniMaxH3分镜（lanxi）",
-    LKH3Shots: "MiniMaxH3分镜合成（lanxi）",
-    LKH3LongVideo: "MiniMax-H3 长视频分段采样（lanxi）",
+    LKH3Shot: "MiniMaxH3分镜（LK）",
+    LKH3Composer: "MiniMaxH3 长视频编排（LK）",
+    LKH3SegmentGuider: "MiniMax-H3 分段引导（LK）",
+    LKH3RefineSegments: "MiniMax-H3 二跑分段精修（LK）",
+    LKH3ReferenceFocus: "MiniMax-H3 参考聚焦（LK）",
+    LKH3AVUpscale: "MiniMax-H3 AV潜空间放大（LK）",
+    LKH3AVDecode: "MiniMax-H3 AV解码（LK）",
 };
 app.registerExtension({
     name: "longvideo.titles",

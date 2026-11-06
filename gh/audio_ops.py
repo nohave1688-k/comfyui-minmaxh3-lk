@@ -261,10 +261,7 @@ class MiniMaxH3AVDecodeGH(io.ComfyNode):
             node_id="LKH3AVDecode",
             display_name="MiniMax-H3 AV解码（LK）",
             category="LK/MiniMax H3 Integration",
-            description=(
-                "Decodes the packed AV latent into frames and audio; also exposes "
-                "the split video/audio latent halves for custom downstream chains."
-            ),
+            description="Decodes the packed AV latent into frames and audio.",
             inputs=[
                 io.Latent.Input(
                     "av_latent",
@@ -272,11 +269,11 @@ class MiniMaxH3AVDecodeGH(io.ComfyNode):
                 ),
                 io.Vae.Input(
                     "video_vae",
-                    tooltip="视频 VAE（从 MiniMaxH3模型设置 节点连线）。",
+                    tooltip="视频 VAE（从 MiniMaxH3 长视频编排 节点连线）。",
                 ),
                 io.Vae.Input(
                     "audio_vae",
-                    tooltip="音频 VAE（从 MiniMaxH3模型设置 节点连线）。",
+                    tooltip="音频 VAE（从 MiniMaxH3 长视频编排 节点连线）。",
                 ),
             ],
             outputs=[
@@ -288,24 +285,16 @@ class MiniMaxH3AVDecodeGH(io.ComfyNode):
                     "audio", display_name="音频",
                     tooltip="解码后的整段音频。",
                 ),
-                io.Latent.Output(
-                    "video_latent", display_name="视频潜空间",
-                    tooltip="仅视频半边的潜空间（含布局元数据）。",
-                ),
-                io.Latent.Output(
-                    "audio_latent", display_name="音频潜空间",
-                    tooltip="仅音频半边的潜空间。",
-                ),
             ],
         )
 
     @classmethod
     def execute(cls, av_latent, video_vae, audio_vae):
-        frames, audio, video_latent, audio_latent = decode_av_latent(
+        frames, audio, _video_latent, _audio_latent = decode_av_latent(
             av_latent, video_vae, audio_vae
         )
         frames = frames.detach().to("cpu")
         if audio is not None and audio.get("waveform") is not None:
             audio = dict(audio)
             audio["waveform"] = audio["waveform"].detach().to("cpu")
-        return io.NodeOutput(frames, audio, video_latent, audio_latent)
+        return io.NodeOutput(frames, audio)
