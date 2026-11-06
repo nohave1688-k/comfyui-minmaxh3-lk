@@ -553,12 +553,20 @@ def build_plan_from_shot_nodes(*, settings=None, shots, film_settings=None,
         start, end = 1, 1
     if start > end:
         start, end = end, start
+    # The range auto-narrows to the shots actually connected: a 结束镜头 set
+    # past the last wired shot can never execute and should not error out.
     if end > len(shots):
-        raise ValueError(
-            f"结束镜头（{end}）超出了实际连接的分镜数量（{len(shots)} 个）。"
-            "请把「结束镜头」调小到已连接的数量，或把缺少的 MiniMaxH3分镜 节点接到 编排 节点的"
-            f"分镜{len(shots) + 1} 插座上。"
+        logging.info(
+            "[LKH3] 结束镜头 %d 超出已连接的分镜数，自动收窄为 %d（分镜 1-%d）",
+            end, len(shots), len(shots),
         )
+        end = len(shots)
+    if start > end:
+        logging.info(
+            "[LKH3] 起始镜头 %d 超出已连接的分镜数，自动收窄为 %d",
+            start, end,
+        )
+        start = end
 
     aspect = film.get("aspect") or settings.get("aspect", "adaptive")
     megapixels = film.get("megapixels", settings.get("megapixels", 0.5))

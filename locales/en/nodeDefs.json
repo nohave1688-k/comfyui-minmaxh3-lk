@@ -333,7 +333,8 @@
         "name": "Range Start"
       },
       "range_end": {
-        "name": "Range End"
+        "name": "Range End",
+        "tooltip": "Auto-narrows to the number of connected shots."
       }
     },
     "outputs": {
