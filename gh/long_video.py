@@ -606,21 +606,24 @@ def _persist_shot_media(shot, idx):
 
 
 def build_plan_from_shot_nodes(*, settings=None, shots, film_settings=None,
-                               latent_continue=True, range_start=1, range_end=1):
+                               latent_continue=True, range_start=1, range_end=1,
+                               clip=None, video_vae=None, audio_vae=None):
     """Assemble the long-video plan from LKH3Settings + ordered LKH3Shot nodes.
 
     ``settings`` (模型设置) is optional legacy fallback: it only contributes the
     CLIP name plus canvas/audio knobs when the 全片提示词设置 node is absent.
     ``film_settings`` (全片提示词设置) supplies the whole-film prompt block —
     prepended to every shot's prompt — and overrides the canvas/audio knobs.
+    Linked clip/VAEs (from the 模型设置 node) are baked into the plan as
+    objects, which is the only channel the lanxi sampler can consume.
     Each shot dict carries its own media as tensors (first_frame, last_frame,
     images/videos/audios lists) which are routed through the
     ``connected_by_segment`` tensor channel for this pack's samplers; the same
     media is also materialized as temp-directory files referenced by name in
     the segment entries, which is the channel the lanxi pack's sampler reads
     (its loaders go through ``folder_paths.get_annotated_filepath``).  CLIP
-    stays None (the samplers take it as a link or lazy-load it); both VAEs are
-    loaded here when names are available.
+    stays None when no link and no name is available (this pack's samplers
+    take it as a link or lazy-load it).
     """
     settings = settings if isinstance(settings, dict) else {}
     film = film_settings if isinstance(film_settings, dict) else {}
@@ -673,8 +676,24 @@ def build_plan_from_shot_nodes(*, settings=None, shots, film_settings=None,
     source_width, source_height = _connected_source_size(first_conn)
     width, height = _media().calculate_canvas(aspect, megapixels, source_width, source_height)
 
-    video_vae = comfy_nodes.VAELoader().load_vae(video_vae_name)[0] if video_vae_name else None
-    audio_vae = comfy_nodes.VAELoader().load_vae(audio_vae_name)[0] if audio_vae_name else None
+    # Linked clip/VAEs win; names are the legacy fallback.  The lanxi sampler
+    # can only consume objects baked into the plan (it has no link inputs).
+    video_vae = video_vae if video_vae is not None else (
+        comfy_nodes.VAELoader().load_vae(video_vae_name)[0] if video_vae_name else None
+    )
+    audio_vae = audio_vae if audio_vae is not None else (
+        comfy_nodes.VAELoader().load_vae(audio_vae_name)[0] if audio_vae_name else None
+    )
+    if clip is None and not clip_name:
+        logging.warning(
+            "[LKH3] 计划未携带 CLIP（未连模型设置、也没接 CLIP 连线）："
+            "喂给 lanxi 长视频分段采样会失败；本包采样器请把 CLIP 直接连到采样节点。"
+        )
+    if video_vae is None or audio_vae is None:
+        logging.warning(
+            "[LKH3] 计划未携带 视频/音频 VAE：lanxi 采样器解码需要它们；"
+            "本包采样器可直接把 VAE 连到采样节点。"
+        )
 
     return {
         "version": 1,
@@ -693,7 +712,7 @@ def build_plan_from_shot_nodes(*, settings=None, shots, film_settings=None,
         "audio_denoise_strength": 0.0,
         "strict_prompt_tags": False,
         "ref_image_size": film.get("ref_image_size") or settings.get("ref_image_size", "match"),
-        "clip": None,
+        "clip": clip,
         "video_vae": video_vae,
         "audio_vae": audio_vae,
         "connected_by_segment": connected_by_segment,

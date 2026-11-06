@@ -333,6 +333,15 @@
       },
       "film_prompt": {
         "name": "Film Prompt"
+      },
+      "clip": {
+        "name": "CLIP"
+      },
+      "video_vae": {
+        "name": "Video VAE"
+      },
+      "audio_vae": {
+        "name": "Audio VAE"
       }
     },
     "outputs": {

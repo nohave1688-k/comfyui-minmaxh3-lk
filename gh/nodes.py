@@ -707,12 +707,6 @@ class MiniMaxH3ShotsGH(io.ComfyNode):
                 optional=True,
                 tooltip="Optional: MiniMaxH3模型设置 output — legacy fallback for the CLIP name and canvas/audio knobs. Canvas/audio now live on the 全片提示词设置 node; CLIP can be linked straight to the sampler.",
             ),
-            io.Custom("LK_H3_FILM_PROMPT").Input(
-                "film_prompt",
-                display_name="全片提示词设置",
-                optional=True,
-                tooltip="MiniMaxH3全片提示词设置 output: one shared prompt block (subject definitions, <Picture n> tags) prepended to every shot, plus canvas/audio settings.",
-            ),
             io.Boolean.Input(
                 "latent_continue",
                 default=True,
@@ -734,6 +728,34 @@ class MiniMaxH3ShotsGH(io.ComfyNode):
                 optional=True,
                 tooltip=f"Shot {i} in the running order.",
             ))
+        # New sockets go AFTER the legacy ones so saved workflows keep their
+        # input-slot indices stable.
+        schema_inputs.extend([
+            io.Custom("LK_H3_FILM_PROMPT").Input(
+                "film_prompt",
+                display_name="全片提示词设置",
+                optional=True,
+                tooltip="MiniMaxH3全片提示词设置 output: one shared prompt block (subject definitions, <Picture n> tags) prepended to every shot, plus canvas/audio settings.",
+            ),
+            io.Custom("CLIP").Input(
+                "clip",
+                display_name="CLIP",
+                optional=True,
+                tooltip="CLIP（从 MiniMaxH3模型设置 连线）— 烘焙进计划，喂给 lanxi 长视频分段采样（它只会按名字加载，必须有对象或名字）。",
+            ),
+            io.Vae.Input(
+                "video_vae",
+                display_name="视频 VAE",
+                optional=True,
+                tooltip="视频 VAE（从 MiniMaxH3模型设置 连线）— 烘焙进计划；lanxi 采样器解码必需。",
+            ),
+            io.Vae.Input(
+                "audio_vae",
+                display_name="音频 VAE",
+                optional=True,
+                tooltip="音频 VAE（从 MiniMaxH3模型设置 连线）— 烘焙进计划；lanxi 采样器解码必需。",
+            ),
+        ])
         return io.Schema(
             node_id="LKH3Shots",
             display_name="MiniMaxH3分镜合成（LK)",
@@ -749,16 +771,18 @@ class MiniMaxH3ShotsGH(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, settings=None, film_prompt=None, latent_continue=True,
+    def execute(cls, settings=None, latent_continue=True,
                 range_start=1, range_end=1,
                 shot_1=None, shot_2=None, shot_3=None, shot_4=None,
-                shot_5=None, shot_6=None, shot_7=None, shot_8=None):
+                shot_5=None, shot_6=None, shot_7=None, shot_8=None,
+                film_prompt=None, clip=None, video_vae=None, audio_vae=None):
         shots = [shot for shot in (shot_1, shot_2, shot_3, shot_4,
                                    shot_5, shot_6, shot_7, shot_8)
                  if shot is not None]
         plan = build_plan_from_shot_nodes(
             settings=settings, film_settings=film_prompt, shots=shots,
             latent_continue=latent_continue, range_start=range_start, range_end=range_end,
+            clip=clip, video_vae=video_vae, audio_vae=audio_vae,
         )
         return io.NodeOutput(plan)
 

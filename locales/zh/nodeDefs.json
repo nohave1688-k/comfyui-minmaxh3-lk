@@ -379,6 +379,18 @@
       "film_prompt": {
         "name": "全片提示词设置",
         "tooltip": "MiniMaxH3全片提示词设置 输出：共享提示词块（主体定义、<Picture n> 标签）拼进每个镜头，外加画布/音频设置。"
+      },
+      "clip": {
+        "name": "CLIP",
+        "tooltip": "CLIP（从 MiniMaxH3模型设置 连线）— 烘焙进计划，喂给 lanxi 长视频分段采样。"
+      },
+      "video_vae": {
+        "name": "视频 VAE",
+        "tooltip": "视频 VAE（从 MiniMaxH3模型设置 连线）— 烘焙进计划；lanxi 采样器解码必需。"
+      },
+      "audio_vae": {
+        "name": "音频 VAE",
+        "tooltip": "音频 VAE（从 MiniMaxH3模型设置 连线）— 烘焙进计划；lanxi 采样器解码必需。"
       }
     },
     "outputs": {
