@@ -1315,8 +1315,8 @@ class MiniMaxH3SegmentGuiderGH(io.ComfyNode):
             inputs=[
                 io.Model.Input("model"),
                 io.Custom(SEGMENT_TYPE).Input("segments", display_name="segments"),
-                io.Int.Input("steps", default=8, min=1, max=1000,
-                             tooltip="一采步数（内置调度用；本节点同时产出配套的 SAMPLER/SIGMAS）。"),
+                io.Int.Input("steps", default=4, min=1, max=1000,
+                             tooltip="一采步数。步数蒸馏 LoRA（4step/step600/加速6步 等）只在各自的短窗口内服从 conditioning——超过蒸馏步数后参考身份会被 LoRA 先验冲掉（实测 6 步参考失效、4 步恢复）。与二跑分段精修的 refine 调度合计对齐 T8 发布日程 4+5。"),
                 io.Float.Input("shift_video", default=12.0, min=0.01, max=100.0, step=0.01),
                 io.Float.Input("shift_audio", default=3.0, min=0.01, max=100.0, step=0.01),
                 io.Combo.Input("sampler_name", options=SAMPLER_OPTIONS, default=DEFAULT_SAMPLER_NAME,

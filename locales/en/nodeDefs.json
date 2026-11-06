@@ -359,8 +359,7 @@
         "name": "分段计划"
       },
       "steps": {
-        "name": "步数",
-        "tooltip": "First-pass steps."
+        "name": "steps"
       },
       "shift_video": {
         "name": "视频偏移"
