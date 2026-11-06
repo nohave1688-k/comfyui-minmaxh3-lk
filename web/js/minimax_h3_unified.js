@@ -1926,6 +1926,34 @@ app.registerExtension({
             };
             return;
         }
+        if (nodeData.name === "LKH3SegmentGuider") {
+            // Output-slot self-healing: canvases saved across output-list changes
+            // keep stale serialized names/types (e.g. the removed conditioning
+            // output). onConfigure runs after the serialized data is applied, so
+            // labels are corrected on every load without touching the links.
+            const EXPECTED_OUTPUTS = [
+                { name: "GUIDER", type: "GUIDER" },
+                { name: "sampler", type: "SAMPLER" },
+                { name: "sigmas", type: "SIGMAS" },
+            ];
+            const previousGuider = nodeType.prototype.onConfigure;
+            nodeType.prototype.onConfigure = function() {
+                const result = previousGuider?.apply(this, arguments);
+                if (!this.outputs) return result;
+                for (let i = 0; i < EXPECTED_OUTPUTS.length; i++) {
+                    const want = EXPECTED_OUTPUTS[i];
+                    const slot = this.outputs[i];
+                    if (slot) {
+                        if (slot.name !== want.name) slot.name = want.name;
+                        if (slot.type !== want.type) slot.type = want.type;
+                    } else {
+                        this.addOutput(want.name, want.type);
+                    }
+                }
+                return result;
+            };
+            return;
+        }
         if (nodeData.name === "LKH3Shot") {
             const previousShot = nodeType.prototype.onNodeCreated;
             nodeType.prototype.onNodeCreated = function() {
