@@ -213,27 +213,6 @@
       }
     }
   },
-  "LKH3Settings": {
-    "display_name": "MiniMaxH3 Model Settings (LK)",
-    "description": "Model selection only: CLIP and VAE link outputs for the samplers and the AV decode node. Canvas/audio/ref-size knobs live on the Whole-Film Prompt node.",
-    "outputs": {
-      "0": {
-        "name": "settings",
-        "tooltip": "Connect to the MiniMaxH3 Shot Storyboard node's settings input."
-      },
-      "1": {
-        "name": "Video VAE",
-        "tooltip": "Selected video VAE as a link — feed the long-video sampler's 视频 VAE input or the AV 解码 node."
-      },
-      "2": {
-        "name": "Audio VAE",
-        "tooltip": "Selected audio VAE as a link — feed the long-video sampler's 音频 VAE input or the AV 解码 node."
-      },
-      "3": {
-        "name": "CLIP"
-      }
-    }
-  },
   "LKH3Shot": {
     "display_name": "MiniMaxH3 Shot (LK)",
     "description": "One long-video shot: duration, prompt, first/last frame and reference media sockets. Output connects to the MiniMaxH3 Shot Merger node.",
@@ -288,66 +267,6 @@
       "0": {
         "name": "shot",
         "tooltip": "Connect to a MiniMaxH3 Shot Merger slot (shots 1-8)."
-      }
-    }
-  },
-  "LKH3Shots": {
-    "display_name": "MiniMaxH3 Shot Merger (LK)",
-    "description": "Collects ordered MiniMaxH3 Shot nodes with the model settings and emits the segment plan for the sampler.",
-    "inputs": {
-      "settings": {
-        "name": "Model Settings (optional)"
-      },
-      "latent_continue": {
-        "name": "latent continue"
-      },
-      "range_start": {
-        "name": "run range start"
-      },
-      "range_end": {
-        "name": "run range end"
-      },
-      "shot_1": {
-        "name": "shot 1"
-      },
-      "shot_2": {
-        "name": "shot 2"
-      },
-      "shot_3": {
-        "name": "shot 3"
-      },
-      "shot_4": {
-        "name": "shot 4"
-      },
-      "shot_5": {
-        "name": "shot 5"
-      },
-      "shot_6": {
-        "name": "shot 6"
-      },
-      "shot_7": {
-        "name": "shot 7"
-      },
-      "shot_8": {
-        "name": "shot 8"
-      },
-      "film_prompt": {
-        "name": "Film Prompt"
-      },
-      "clip": {
-        "name": "CLIP"
-      },
-      "video_vae": {
-        "name": "Video VAE"
-      },
-      "audio_vae": {
-        "name": "Audio VAE"
-      }
-    },
-    "outputs": {
-      "0": {
-        "name": "segments",
-        "tooltip": "Long-video segment plan; connect to the long video sampler."
       }
     }
   },
@@ -490,49 +409,6 @@
       }
     }
   },
-  "LKH3AVTemplate": {
-    "display_name": "MiniMax-H3 Empty AV Template (LK)",
-    "description": "Emits the whole-range empty nested AV latent (+ lk_layout) so contract nodes and SamplerCustomAdvanced stay acyclic.",
-    "inputs": {
-      "segments": {
-        "name": "分段计划"
-      }
-    },
-    "outputs": {
-      "0": {
-        "name": "AV 潜空间",
-        "tooltip": "整段空白 AV 模板（含 lk_layout 布局）— 接 双钟采样/T8契约 的 av_latent 和 SamplerCustomAdvanced 的 latent_image。"
-      }
-    }
-  },
-  "LKH3FilmPrompt": {
-    "display_name": "MiniMaxH3 Whole-Film Prompt (LK)",
-    "description": "Whole-film settings: one shared prompt block prepended to every shot, plus canvas/audio knobs.",
-    "inputs": {
-      "film_prompt": {
-        "name": "Film Prompt",
-        "tooltip": "Prepended to every shot prompt. Leave empty to skip."
-      },
-      "aspect": {
-        "name": "Aspect"
-      },
-      "megapixels": {
-        "name": "Megapixels"
-      },
-      "ref_image_size": {
-        "name": "Ref Image Size"
-      },
-      "audio_mode": {
-        "name": "Audio Mode"
-      }
-    },
-    "outputs": {
-      "0": {
-        "name": "Film Settings",
-        "tooltip": "Connect to the 分镜合成 node."
-      }
-    }
-  },
   "LKH3RefineSegments": {
     "display_name": "MiniMax-H3 Segmented Refine (LK)",
     "description": "Segmented HD second pass: refines the upscaled whole-film latent one shot at a time.",
@@ -641,6 +517,62 @@
     "outputs": {
       "0": {
         "name": "image"
+      }
+    }
+  },
+  "LKH3Composer": {
+    "display_name": "MiniMaxH3 Long-Video Composer (LK)",
+    "description": "One-stop long-video composer: whole-film prompt, model selection, shot collection, and the empty-AV template in one node.",
+    "inputs": {
+      "film_prompt": {
+        "name": "Film Prompt"
+      },
+      "clip_name": {
+        "name": "CLIP"
+      },
+      "video_vae_name": {
+        "name": "Video VAE"
+      },
+      "audio_vae_name": {
+        "name": "Audio VAE"
+      },
+      "aspect": {
+        "name": "Aspect"
+      },
+      "megapixels": {
+        "name": "Megapixels"
+      },
+      "ref_image_size": {
+        "name": "Ref Image Size"
+      },
+      "audio_mode": {
+        "name": "Audio Mode"
+      },
+      "latent_continue": {
+        "name": "Latent Continue"
+      },
+      "range_start": {
+        "name": "Range Start"
+      },
+      "range_end": {
+        "name": "Range End"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "segments"
+      },
+      "1": {
+        "name": "Empty AV Template"
+      },
+      "2": {
+        "name": "CLIP"
+      },
+      "3": {
+        "name": "Video VAE"
+      },
+      "4": {
+        "name": "Audio VAE"
       }
     }
   }

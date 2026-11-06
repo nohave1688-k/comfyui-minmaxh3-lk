@@ -20,8 +20,13 @@ merge) that keeps only the long-video core:
 * ``LKH3SegmentGuider`` — the T8-style GUIDER for the first pass: owns the
   segmented loop (per-shot conditioning + LoRA, latent continuation) while
   sampler/sigmas/seed/cfg come from the standard primitives.
-* ``LKH3AVTemplate`` — the whole-range empty nested AV latent (+ lk_layout)
-  that keeps external sampling recipes acyclic.
+* ``LKH3RefineSegments`` — the segmented HD second pass: refines the
+  upscaled whole-film latent one shot at a time (per-shot HD conditioning,
+  external refine schedule, first-pass audio kept verbatim).
+* ``LKH3ReferenceFocus`` — reference-photo preprocessing (YuNet face crops
+  into an identity sheet) for stronger identity adherence.
+* ``LKH3Composer`` — one-stop film composer (whole-film prompt + model
+  selection + shot collection + empty-AV template output).
 * ``LKH3AVDecode`` — decodes the packed AV latent back to frames + audio.
 
 Removed from the lanxi pack during the rebuild: the single-mode pipeline
@@ -47,36 +52,36 @@ from .gh import prompt_optimizer as _gh_prompt_optimizer  # noqa: F401  (registe
 
 NODE_CLASS_MAPPINGS = {
     "LKH3Studio": _gh_nodes.MiniMaxH3IntegrationGH,
-    "LKH3Settings": _gh_nodes.MiniMaxH3SettingsGH,
     "LKH3Shot": _gh_nodes.MiniMaxH3ShotGH,
-    "LKH3Shots": _gh_nodes.MiniMaxH3ShotsGH,
     "LKH3SamplerSettings": _gh_long_video.MiniMaxH3SamplerSettingsGH,
     "LKH3LongVideo": _gh_long_video.MiniMaxH3LongVideoRunnerGH,
     "LKH3AVUpscale": _gh_latent_upscale.MiniMaxH3AVUpscaleGH,
     "LKH3DualClockSampler": _gh_sampling.MiniMaxH3DualClockSamplerGH,
     "LKH3AVDecode": _gh_audio_ops.MiniMaxH3AVDecodeGH,
     "LKH3SegmentGuider": _gh_long_video.MiniMaxH3SegmentGuiderGH,
-    "LKH3AVTemplate": _gh_long_video.MiniMaxH3AVTemplateGH,
     "LKH3RefineSegments": _gh_long_video.MiniMaxH3RefineSegmentsGH,
     "LKH3ReferenceFocus": _gh_reference_tools.MiniMaxH3ReferenceFocusGH,
-    "LKH3FilmPrompt": _gh_nodes.MiniMaxH3FilmPromptGH,
+    "LKH3Composer": _gh_nodes.MiniMaxH3ComposerGH,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "LKH3Studio": "MiniMaxH3长视频操作台（LK)",
-    "LKH3Settings": "MiniMaxH3模型设置（LK)",
+    # REMOVED: LKH3{gone}
+    # "LKH3{gone}"模型设置（LK)",
     "LKH3Shot": "MiniMaxH3分镜（LK）",
-    "LKH3Shots": "MiniMaxH3分镜合成（LK）",
+    # REMOVED: LKH3{gone}
+    # "LKH3{gone}"分镜合成（LK）",
     "LKH3SamplerSettings": "MiniMaxH3采样设置（LK）",
     "LKH3LongVideo": "MiniMax-H3 长视频分段采样（LK）",
     "LKH3AVUpscale": "MiniMax-H3 AV潜空间放大（LK）",
     "LKH3DualClockSampler": "MiniMax-H3 双钟采样（LK）",
     "LKH3AVDecode": "MiniMax-H3 AV解码（LK）",
     "LKH3SegmentGuider": "MiniMax-H3 分段引导（LK）",
-    "LKH3AVTemplate": "MiniMax-H3 空白AV模板（LK）",
     "LKH3RefineSegments": "MiniMax-H3 二跑分段精修（LK）",
     "LKH3ReferenceFocus": "MiniMax-H3 参考聚焦（LK）",
-    "LKH3FilmPrompt": "MiniMaxH3全片提示词设置（LK）",
+    "LKH3Composer": "MiniMaxH3 长视频编排（LK）",
+    # REMOVED: LKH3{gone}
+    # "LKH3{gone}"全片提示词设置（LK）",
 }
 
 # LoRA list for the per-segment LoRA slots.  ``folder_paths`` is resolved at

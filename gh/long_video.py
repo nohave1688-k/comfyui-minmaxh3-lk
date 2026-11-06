@@ -608,7 +608,7 @@ def _persist_shot_media(shot, idx):
 def build_plan_from_shot_nodes(*, settings=None, shots, film_settings=None,
                                latent_continue=True, range_start=1, range_end=1,
                                clip=None, video_vae=None, audio_vae=None):
-    """Assemble the long-video plan from LKH3Settings + ordered LKH3Shot nodes.
+    """Assemble the long-video plan from the composer + ordered LKH3Shot nodes.
 
     ``settings`` (模型设置) is optional legacy fallback: it only contributes the
     CLIP name plus canvas/audio knobs when the 全片提示词设置 node is absent.
@@ -713,72 +713,6 @@ def build_plan_from_shot_nodes(*, settings=None, shots, film_settings=None,
         "strict_prompt_tags": False,
         "ref_image_size": film.get("ref_image_size") or settings.get("ref_image_size", "match"),
         "clip": clip,
-        "video_vae": video_vae,
-        "audio_vae": audio_vae,
-        "connected_by_segment": connected_by_segment,
-        "preview": None,
-    }
-
-
-def build_plan_from_shots(*, settings, segments_json, latent_continue=True,
-                          range_start=1, range_end=1, connected_media=None,
-                          connected_apply="all segments"):
-    """Assemble the long-video plan for the two-node (settings + shots) chain.
-
-    ``settings`` is the dict produced by the LKH3Settings node (model names
-    and global canvas/audio options); the shot table comes from the shots
-    node's panel payload.  Same plan keys as :func:`build_multi_plan`, except
-    the CLIP stays None (the sampler lazy-loads it) and no start preview is
-    built — the sampler builds per-segment bundles during the run.
-    """
-    if not isinstance(settings, dict) or not settings:
-        raise ValueError("请先连接「MiniMaxH3模型设置」节点：分镜编排需要模型设置输入。")
-    config = parse_segments(segments_json)
-    try:
-        start = max(1, min(MAX_SEGMENTS, int(range_start)))
-        end = max(1, min(MAX_SEGMENTS, int(range_end)))
-    except (TypeError, ValueError):
-        start, end = 1, 1
-    if start > end:
-        start, end = end, start
-    config["range"] = {"start": start, "end": end}
-    config["latent_continue"] = bool(latent_continue)
-
-    aspect = settings.get("aspect", "adaptive")
-    megapixels = settings.get("megapixels", 0.5)
-    clip_name = settings.get("clip_name")
-    video_vae_name = settings.get("video_vae_name")
-    audio_vae_name = settings.get("audio_vae_name")
-    if not clip_name:
-        raise ValueError("模型设置节点未提供 CLIP 模型，请在设置节点上选择。")
-
-    collected = connected_media or {}
-    connected_by_segment = _distribute_connected(collected, connected_apply, config)
-    connected_first = connected_by_segment.get(int(config["range"]["start"])) or {}
-    source_width, source_height = _connected_source_size(connected_first)
-    if source_width is None:
-        source_width, source_height = _segment_source_size(config["segments"][0])
-    width, height = _media().calculate_canvas(aspect, megapixels, source_width, source_height)
-    for segment in config["segments"]:
-        segment["length"] = _media().calculate_length(segment["duration"])
-
-    video_vae = comfy_nodes.VAELoader().load_vae(video_vae_name)[0] if video_vae_name else None
-    audio_vae = comfy_nodes.VAELoader().load_vae(audio_vae_name)[0] if audio_vae_name else None
-
-    return {
-        **config,
-        "width": width,
-        "height": height,
-        "clip_name": clip_name,
-        "video_vae_name": video_vae_name,
-        "audio_vae_name": audio_vae_name,
-        "aspect": aspect,
-        "megapixels": megapixels,
-        "audio_mode": settings.get("audio_mode", "native"),
-        "audio_denoise_strength": 0.0,
-        "strict_prompt_tags": False,
-        "ref_image_size": settings.get("ref_image_size", "match"),
-        "clip": None,
         "video_vae": video_vae,
         "audio_vae": audio_vae,
         "connected_by_segment": connected_by_segment,
@@ -1449,39 +1383,6 @@ class MiniMaxH3SegmentGuiderGH(io.ComfyNode):
             prebuilt=(first_bundle, clip),
         )
         return io.NodeOutput(guider, first_bundle["positive"])
-
-
-class MiniMaxH3AVTemplateGH(io.ComfyNode):
-    @classmethod
-    def define_schema(cls):
-        return io.Schema(
-            node_id="LKH3AVTemplate",
-            display_name="MiniMax-H3 空白AV模板（LK）",
-            category="LK/MiniMax H3 Integration",
-            description=(
-                "Emits the whole-range empty nested AV latent (zeros + lk_layout) "
-                "matching the segmented sampler's assembly, so contract nodes and "
-                "SamplerCustomAdvanced's latent_image stay acyclic."
-            ),
-            inputs=[
-                io.Custom(SEGMENT_TYPE).Input("segments", display_name="segments"),
-            ],
-            outputs=[
-                io.Latent.Output(
-                    "av_latent", display_name="AV 潜空间",
-                    tooltip="整段空白 AV 模板（含 lk_layout 布局）— 接 双钟采样/T8契约 的 av_latent 和 SamplerCustomAdvanced 的 latent_image。",
-                ),
-            ],
-        )
-
-    @classmethod
-    def execute(cls, segments):
-        plan = segments
-        if not isinstance(plan, dict) or not plan.get("segments"):
-            raise ValueError("Connect the storyboard node's 'segments' output to the AV template node.")
-        start = int(plan["range"]["start"]) - 1
-        end = int(plan["range"]["end"]) - 1
-        return io.NodeOutput(build_empty_plan_latent(plan, start, end))
 
 
 class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):

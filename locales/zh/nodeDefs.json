@@ -211,74 +211,6 @@
       }
     }
   },
-  "LKH3Settings": {
-    "display_name": "MiniMaxH3模型设置（LK)",
-    "description": "模型选择节点：CLIP 与双 VAE 连线输出，供采样器/分段引导/AV解码 使用。画布、音频模式、参考尺寸等全片级旋钮在「全片提示词设置」节点上。",
-    "inputs": {
-      "clip_name": {
-        "name": "CLIP模型"
-      },
-      "video_vae_name": {
-        "name": "视频 VAE"
-      },
-      "audio_vae_name": {
-        "name": "音频 VAE"
-      },
-      "aspect": {
-        "name": "宽高比例",
-        "options": {
-          "adaptive": "自适应",
-          "16:9": "16:9",
-          "9:16": "9:16",
-          "3:2": "3:2",
-          "2:3": "2:3",
-          "4:3": "4:3",
-          "3:4": "3:4",
-          "1:1": "1:1",
-          "21:9": "21:9"
-        }
-      },
-      "megapixels": {
-        "name": "百万像素"
-      },
-      "ref_image_size": {
-        "name": "参考素材尺寸",
-        "options": {
-          "match": "匹配",
-          "1.2x": "1.2倍",
-          "1.5x": "1.5倍",
-          "2x": "2倍",
-          "max": "最大值"
-        }
-      },
-      "audio_mode": {
-        "name": "音频参考模式",
-        "options": {
-          "lock_source": "原生输出",
-          "reference_only": "仅参考音频",
-          "native": "自由生成"
-        }
-      }
-    },
-    "outputs": {
-      "0": {
-        "name": "模型设置",
-        "tooltip": "连接到 MiniMaxH3分镜编排 节点的模型设置输入。"
-      },
-      "1": {
-        "name": "视频 VAE",
-        "tooltip": "所选视频 VAE 连线输出 — 接长视频分段的 视频 VAE 或 AV解码 节点。"
-      },
-      "2": {
-        "name": "音频 VAE",
-        "tooltip": "所选音频 VAE 连线输出 — 接长视频分段的 音频 VAE 或 AV解码 节点。"
-      },
-      "3": {
-        "name": "CLIP",
-        "tooltip": "所选 CLIP 连线输出 — 接长视频采样/分段引导 的 CLIP 输入。"
-      }
-    }
-  },
   "LKH3Shot": {
     "display_name": "MiniMaxH3分镜（LK)",
     "description": "长视频的单个分镜：时长、提示词、首尾帧与参考素材连线插座；输出接 MiniMaxH3分镜合成 节点。",
@@ -333,70 +265,6 @@
       "0": {
         "name": "shot",
         "tooltip": "连接到 MiniMaxH3分镜合成 节点的 分镜 1-8 输入。"
-      }
-    }
-  },
-  "LKH3Shots": {
-    "display_name": "MiniMaxH3分镜合成（LK)",
-    "description": "按连接顺序收集 MiniMaxH3分镜 节点，与模型设置一起组成长视频分镜计划，输出接长视频采样节点。",
-    "inputs": {
-      "settings": {
-        "name": "模型设置（可选）"
-      },
-      "latent_continue": {
-        "name": "潜空间续接"
-      },
-      "range_start": {
-        "name": "运行范围·起"
-      },
-      "range_end": {
-        "name": "运行范围·止"
-      },
-      "shot_1": {
-        "name": "分镜 1"
-      },
-      "shot_2": {
-        "name": "分镜 2"
-      },
-      "shot_3": {
-        "name": "分镜 3"
-      },
-      "shot_4": {
-        "name": "分镜 4"
-      },
-      "shot_5": {
-        "name": "分镜 5"
-      },
-      "shot_6": {
-        "name": "分镜 6"
-      },
-      "shot_7": {
-        "name": "分镜 7"
-      },
-      "shot_8": {
-        "name": "分镜 8"
-      },
-      "film_prompt": {
-        "name": "全片提示词设置",
-        "tooltip": "MiniMaxH3全片提示词设置 输出：共享提示词块（主体定义、<Picture n> 标签）拼进每个镜头，外加画布/音频设置。"
-      },
-      "clip": {
-        "name": "CLIP",
-        "tooltip": "CLIP（从 MiniMaxH3模型设置 连线）— 烘焙进计划，喂给 lanxi 长视频分段采样。"
-      },
-      "video_vae": {
-        "name": "视频 VAE",
-        "tooltip": "视频 VAE（从 MiniMaxH3模型设置 连线）— 烘焙进计划；lanxi 采样器解码必需。"
-      },
-      "audio_vae": {
-        "name": "音频 VAE",
-        "tooltip": "音频 VAE（从 MiniMaxH3模型设置 连线）— 烘焙进计划；lanxi 采样器解码必需。"
-      }
-    },
-    "outputs": {
-      "0": {
-        "name": "segments",
-        "tooltip": "长视频分镜计划；接长视频采样节点。"
       }
     }
   },
@@ -540,49 +408,6 @@
       }
     }
   },
-  "LKH3AVTemplate": {
-    "display_name": "MiniMax-H3 空白AV模板（LK）",
-    "description": "按分段计划输出整段空白嵌套 AV 潜空间（零张量 + lk_layout 布局），供契约节点和 SamplerCustomAdvanced 的 latent_image 使用，保持外接采样配方无环。",
-    "inputs": {
-      "segments": {
-        "name": "分段计划"
-      }
-    },
-    "outputs": {
-      "0": {
-        "name": "AV 潜空间",
-        "tooltip": "整段空白 AV 模板（含 lk_layout 布局）— 接 双钟采样/T8契约 的 av_latent 和 SamplerCustomAdvanced 的 latent_image。"
-      }
-    }
-  },
-  "LKH3FilmPrompt": {
-    "display_name": "MiniMaxH3全片提示词设置（LK）",
-    "description": "全片级设置：一段共享提示词（主体定义、风格块、<Picture n> 标签）拼接到每个镜头前面，外加画布与音频模式。这些是全片级参数，不属于模型设置。",
-    "inputs": {
-      "film_prompt": {
-        "name": "全片提示词",
-        "tooltip": "拼接到每个镜头提示词前面的全片内容（主体定义、风格块、<Picture n> 标签）。留空则不追加。"
-      },
-      "aspect": {
-        "name": "宽高比例"
-      },
-      "megapixels": {
-        "name": "百万像素"
-      },
-      "ref_image_size": {
-        "name": "参考素材尺寸"
-      },
-      "audio_mode": {
-        "name": "音频参考模式"
-      }
-    },
-    "outputs": {
-      "0": {
-        "name": "全片提示词设置",
-        "tooltip": "连接到 MiniMaxH3分镜合成 的 全片提示词设置 输入。"
-      }
-    }
-  },
   "LKH3RefineSegments": {
     "display_name": "MiniMax-H3 二跑分段精修（LK）",
     "description": "分段高清二跑：把放大后的整条 AV 潜空间逐镜切片精修——每镜在放大后画布上重编码参考（等价 T8 HIGH conditioning），逐镜 LoRA，外接精修调度表，一采音频原样保留。",
@@ -699,6 +524,66 @@
       "0": {
         "name": "image",
         "tooltip": "预处理后的参考图 — 接分镜节点的 参考图 插座。"
+      }
+    }
+  },
+  "LKH3Composer": {
+    "display_name": "MiniMaxH3 长视频编排（LK）",
+    "description": "一站式长视频编排：全片提示词 + 模型选择 + 分镜收集 + 空白AV模板 合并为一个节点，输出口直供 分段引导/分段采样/二跑分段精修/T8契约/AV解码。",
+    "inputs": {
+      "film_prompt": {
+        "name": "全片提示词",
+        "tooltip": "拼接到每个镜头提示词前面的全片内容（主体定义、风格块、<Picture n> 标签）。留空则不追加。"
+      },
+      "clip_name": {
+        "name": "CLIP模型"
+      },
+      "video_vae_name": {
+        "name": "视频 VAE"
+      },
+      "audio_vae_name": {
+        "name": "音频 VAE"
+      },
+      "aspect": {
+        "name": "宽高比例"
+      },
+      "megapixels": {
+        "name": "百万像素"
+      },
+      "ref_image_size": {
+        "name": "参考素材尺寸"
+      },
+      "audio_mode": {
+        "name": "音频参考模式"
+      },
+      "latent_continue": {
+        "name": "潜空间续接"
+      },
+      "range_start": {
+        "name": "起始镜头"
+      },
+      "range_end": {
+        "name": "结束镜头"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "segments",
+        "tooltip": "分段计划 — 接 分段引导/分段采样/二跑分段精修。"
+      },
+      "1": {
+        "name": "空白AV模板",
+        "tooltip": "整段空白 AV 模板（含 lk_layout）— 接 双钟采样/T8契约 的 av_latent 和 SamplerCustomAdvanced 的 latent_image。"
+      },
+      "2": {
+        "name": "CLIP",
+        "tooltip": "CLIP 连线输出 — 接 采样器/分段引导/二跑分段精修 的 CLIP 输入。"
+      },
+      "3": {
+        "name": "视频 VAE"
+      },
+      "4": {
+        "name": "音频 VAE"
       }
     }
   }
