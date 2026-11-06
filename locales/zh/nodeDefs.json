@@ -348,7 +348,7 @@
   },
   "LKH3SegmentGuider": {
     "display_name": "MiniMax-H3 分段引导（LK）",
-    "description": "一采的 T8 写法：GUIDER 对象内部承担分段循环（逐镜条件+LoRA、潜空间续接），采样器/调度表/种子/cfg 全部来自 SamplerCustomAdvanced 外接的标准原语。",
+    "description": "一采的 T8 写法：GUIDER 对象内部承担分段循环（逐镜条件+LoRA、潜空间续接），并直接产出与之配套的 SAMPLER/SIGMAS——steps/shifts 单一来源，无重复契约节点。四个输出口接 SamplerCustomAdvanced（sampler/sigmas 用本节点的，noise 任意，latent_image 用空白AV模板）。",
     "inputs": {
       "model": {
         "name": "模型"
@@ -358,7 +358,7 @@
       },
       "steps": {
         "name": "步数",
-        "tooltip": "仅在未连接外部调度表时用于内置调度；外接 SIGMAS 时忽略。"
+        "tooltip": "一采步数（本节点同时产出配套的 SAMPLER/SIGMAS）。"
       },
       "shift_video": {
         "name": "视频偏移"
@@ -395,6 +395,13 @@
       "clip": {
         "name": "CLIP",
         "tooltip": "CLIP（从 MiniMaxH3模型设置 节点的 CLIP 输出连线），用于逐镜条件构建。未连接时按模型设置名字加载。"
+      },
+      "sampler_name": {
+        "name": "采样器",
+        "tooltip": "dual_clock_euler = 内置双钟欧拉；选标准采样器名则切 FLOW_AV 补丁。"
+      },
+      "scheduler": {
+        "name": "调度器"
       }
     },
     "outputs": {
@@ -405,6 +412,14 @@
       "1": {
         "name": "conditioning",
         "tooltip": "首镜的正向条件（预构建，循环内复用）— 供下游二采 BasicGuider 使用。"
+      },
+      "2": {
+        "name": "sampler",
+        "tooltip": "与本节点 steps/shifts 配套的一采 SAMPLER — 接 SamplerCustomAdvanced 的 sampler。"
+      },
+      "3": {
+        "name": "sigmas",
+        "tooltip": "与本节点 steps/shifts/scheduler 配套的一采调度表 — 接 SamplerCustomAdvanced 的 sigmas。"
       }
     }
   },

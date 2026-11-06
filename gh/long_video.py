@@ -1261,13 +1261,15 @@ class _SegmentedAVGuider:
     """
 
     def __init__(self, model_patcher, plan, *, steps, shift_video, shift_audio,
-                 seed, seed_policy, cfg, context_noise, release_clip,
-                 free_between_segments, video_vae, audio_vae, prebuilt):
+                 sampler_name, scheduler, seed, seed_policy, cfg, context_noise,
+                 release_clip, free_between_segments, video_vae, audio_vae, prebuilt):
         self.model_patcher = model_patcher
         self._plan = plan
         self._steps = int(steps)
         self._shift_video = float(shift_video)
         self._shift_audio = float(shift_audio)
+        self._sampler_name = sampler_name or DEFAULT_SAMPLER_NAME
+        self._scheduler = scheduler or DEFAULT_SCHEDULER_NAME
         self._seed = int(seed)
         self._seed_policy = seed_policy
         self._cfg = float(cfg)
@@ -1283,7 +1285,7 @@ class _SegmentedAVGuider:
         av_latent, _first_positive = run_long_video(
             self.model_patcher, self._plan,
             steps=self._steps, shift_video=self._shift_video, shift_audio=self._shift_audio,
-            sampler_name=DEFAULT_SAMPLER_NAME, scheduler=DEFAULT_SCHEDULER_NAME,
+            sampler_name=self._sampler_name, scheduler=self._scheduler,
             seed=int(self._seed if seed is None else seed),
             seed_policy=self._seed_policy, cfg=self._cfg,
             release_clip=self._release_clip, free_between_segments=self._free_between_segments,
@@ -1304,17 +1306,22 @@ class MiniMaxH3SegmentGuiderGH(io.ComfyNode):
             category="LK/MiniMax H3 Integration",
             description=(
                 "T8-style GUIDER for the first pass: owns the segmented loop "
-                "(per-shot conditioning + LoRA, latent continuation) while the "
-                "sampler, schedule, seed and cfg come from the standard "
-                "primitives wired into SamplerCustomAdvanced."
+                "(per-shot conditioning + LoRA, latent continuation) and emits its own "
+                "SAMPLER / SIGMAS contract from the same steps/shifts recipe — one "
+                "source of truth for the first-pass sampling.  Wire its four outputs "
+                "into SamplerCustomAdvanced (sampler/sigmas from this node, noise from "
+                "any NOISE primitive, latent_image from the 空白AV模板)."
             ),
             inputs=[
                 io.Model.Input("model"),
                 io.Custom(SEGMENT_TYPE).Input("segments", display_name="segments"),
                 io.Int.Input("steps", default=8, min=1, max=1000,
-                             tooltip="仅在未连接外部调度表时用于内置调度；外接 SIGMAS 时忽略。"),
+                             tooltip="一采步数（内置调度用；本节点同时产出配套的 SAMPLER/SIGMAS）。"),
                 io.Float.Input("shift_video", default=12.0, min=0.01, max=100.0, step=0.01),
                 io.Float.Input("shift_audio", default=3.0, min=0.01, max=100.0, step=0.01),
+                io.Combo.Input("sampler_name", options=SAMPLER_OPTIONS, default=DEFAULT_SAMPLER_NAME,
+                               tooltip="dual_clock_euler = 内置双钟欧拉；选标准采样器名则切 FLOW_AV 补丁。"),
+                io.Combo.Input("scheduler", options=SCHEDULER_OPTIONS, default=DEFAULT_SCHEDULER_NAME),
                 io.Int.Input("seed", default=0, min=0, max=0xFFFFFFFFFFFFFFFF),
                 io.Combo.Input("seed_policy", options=["increment", "fixed"], default="fixed",
                                tooltip="increment = 每镜种子+1；fixed = 全部镜头同一种子。"),
@@ -1328,31 +1335,40 @@ class MiniMaxH3SegmentGuiderGH(io.ComfyNode):
                 io.Boolean.Input("free_between_segments", default=True, advanced=True),
                 io.Vae.Input(
                     "video_vae", optional=True, display_name="视频 VAE",
-                    tooltip="视频 VAE（从 MiniMaxH3模型设置 节点连线），用于参考图编码。未连接时按模型设置名字加载。",
+                    tooltip="视频 VAE（从 长视频编排 节点连线），用于参考图编码。未连接时按模型设置名字加载。",
                 ),
                 io.Vae.Input(
                     "audio_vae", optional=True, display_name="音频 VAE",
-                    tooltip="音频 VAE（从 MiniMaxH3模型设置 节点连线）。未连接时按模型设置名字加载。",
+                    tooltip="音频 VAE（从 长视频编排 节点连线）。未连接时按模型设置名字加载。",
                 ),
                 io.Custom("CLIP").Input(
                     "clip", optional=True, display_name="CLIP",
-                    tooltip="CLIP（从 MiniMaxH3模型设置 节点的 CLIP 输出连线），用于逐镜条件构建。未连接时按模型设置名字加载。",
+                    tooltip="CLIP（从 长视频编排 节点的 CLIP 输出连线），用于逐镜条件构建。未连接时按名字加载。",
                 ),
             ],
             outputs=[
                 io.Guider.Output(
                     display_name="GUIDER",
-                    tooltip="分段引导对象 — 接 SamplerCustomAdvanced 的 guider。采样器/调度表/种子/cfg 全部由该原语链决定。",
+                    tooltip="分段引导对象 — 接 SamplerCustomAdvanced 的 guider。",
                 ),
                 io.Conditioning.Output(
                     "conditioning", display_name="conditioning",
                     tooltip="首镜的正向条件（预构建，循环内复用）— 供下游二采 BasicGuider 使用。",
                 ),
+                io.Sampler.Output(
+                    "sampler", display_name="sampler",
+                    tooltip="与本节点 steps/shifts 配套的一采 SAMPLER — 接 SamplerCustomAdvanced 的 sampler。",
+                ),
+                io.Sigmas.Output(
+                    "sigmas", display_name="sigmas",
+                    tooltip="与本节点 steps/shifts/scheduler 配套的一采调度表 — 接 SamplerCustomAdvanced 的 sigmas。",
+                ),
             ],
         )
 
     @classmethod
-    def execute(cls, model, segments, steps, shift_video, shift_audio, seed,
+    def execute(cls, model, segments, steps, shift_video, shift_audio,
+                sampler_name, scheduler, seed,
                 seed_policy, context_noise, cfg,
                 release_clip=True, free_between_segments=True,
                 video_vae=None, audio_vae=None, clip=None):
@@ -1377,12 +1393,21 @@ class MiniMaxH3SegmentGuiderGH(io.ComfyNode):
         guider = _SegmentedAVGuider(
             model, plan,
             steps=steps, shift_video=shift_video, shift_audio=shift_audio,
+            sampler_name=sampler_name, scheduler=scheduler,
             seed=seed, seed_policy=seed_policy, cfg=cfg, context_noise=context_noise,
             release_clip=release_clip, free_between_segments=free_between_segments,
             video_vae=video_vae, audio_vae=audio_vae,
             prebuilt=(first_bundle, clip),
         )
-        return io.NodeOutput(guider, first_bundle["positive"])
+        # The sampler contract is built HERE from the same steps/shifts recipe
+        # the loop uses — one source of truth, no separate contract node whose
+        # widgets could drift out of sync.
+        _contract_model, contract_sampler, contract_sigmas = setup_dual_clock_sampling_gh(
+            model, build_empty_plan_latent(plan, start, end),
+            int(steps), float(shift_video), float(shift_audio),
+            sampler_name or DEFAULT_SAMPLER_NAME, scheduler or DEFAULT_SCHEDULER_NAME,
+        )
+        return io.NodeOutput(guider, first_bundle["positive"], contract_sampler, contract_sigmas)
 
 
 class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):

@@ -350,7 +350,7 @@
   },
   "LKH3SegmentGuider": {
     "display_name": "MiniMax-H3 Segment Guider (LK)",
-    "description": "T8-style GUIDER for the first pass: owns the segmented loop while sampler/sigmas/seed/cfg come from the standard primitives.",
+    "description": "T8-style GUIDER for the first pass: owns the segmented loop and emits its own matching SAMPLER/SIGMAS - one source of truth for the first-pass recipe.",
     "inputs": {
       "model": {
         "name": "模型"
@@ -360,7 +360,7 @@
       },
       "steps": {
         "name": "步数",
-        "tooltip": "仅在未连接外部调度表时用于内置调度；外接 SIGMAS 时忽略。"
+        "tooltip": "First-pass steps."
       },
       "shift_video": {
         "name": "视频偏移"
@@ -396,6 +396,12 @@
       },
       "clip": {
         "name": "CLIP"
+      },
+      "sampler_name": {
+        "name": "sampler"
+      },
+      "scheduler": {
+        "name": "scheduler"
       }
     },
     "outputs": {
@@ -406,6 +412,12 @@
       "1": {
         "name": "conditioning",
         "tooltip": "首镜的正向条件（预构建，循环内复用）— 供下游二采 BasicGuider 使用。"
+      },
+      "2": {
+        "name": "sampler"
+      },
+      "3": {
+        "name": "sigmas"
       }
     }
   },
