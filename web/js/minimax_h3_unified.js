@@ -1929,27 +1929,39 @@ app.registerExtension({
         if (nodeData.name === "LKH3SegmentGuider") {
             // Output-slot self-healing: canvases saved across output-list changes
             // keep stale serialized names/types (e.g. the removed conditioning
-            // output). onConfigure runs after the serialized data is applied, so
-            // labels are corrected on every load without touching the links.
+            // output). The Vue render layer can also re-apply the serialized
+            // labels after onConfigure, so the fix runs immediately, on the next
+            // animation frame and once more after 100ms.
             const EXPECTED_OUTPUTS = [
                 { name: "GUIDER", type: "GUIDER" },
                 { name: "sampler", type: "SAMPLER" },
                 { name: "sigmas", type: "SIGMAS" },
             ];
-            const previousGuider = nodeType.prototype.onConfigure;
-            nodeType.prototype.onConfigure = function() {
-                const result = previousGuider?.apply(this, arguments);
-                if (!this.outputs) return result;
+            const fixOutputs = (node) => {
+                if (!node.outputs) return;
                 for (let i = 0; i < EXPECTED_OUTPUTS.length; i++) {
                     const want = EXPECTED_OUTPUTS[i];
-                    const slot = this.outputs[i];
+                    const slot = node.outputs[i];
                     if (slot) {
                         if (slot.name !== want.name) slot.name = want.name;
                         if (slot.type !== want.type) slot.type = want.type;
                     } else {
-                        this.addOutput(want.name, want.type);
+                        node.addOutput(want.name, want.type);
                     }
                 }
+            };
+            const previousGuiderCreated = nodeType.prototype.onNodeCreated;
+            nodeType.prototype.onNodeCreated = function() {
+                const result = previousGuiderCreated?.apply(this, arguments);
+                fixOutputs(this);
+                return result;
+            };
+            const previousGuiderConfigure = nodeType.prototype.onConfigure;
+            nodeType.prototype.onConfigure = function() {
+                const result = previousGuiderConfigure?.apply(this, arguments);
+                fixOutputs(this);
+                requestAnimationFrame(() => fixOutputs(this));
+                setTimeout(() => fixOutputs(this), 100);
                 return result;
             };
             return;
