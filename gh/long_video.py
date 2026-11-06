@@ -553,6 +553,12 @@ def build_plan_from_shot_nodes(*, settings=None, shots, film_settings=None,
         start, end = 1, 1
     if start > end:
         start, end = end, start
+    if end > len(shots):
+        raise ValueError(
+            f"结束镜头（{end}）超出了实际连接的分镜数量（{len(shots)} 个）。"
+            "请把「结束镜头」调小到已连接的数量，或把缺少的 MiniMaxH3分镜 节点接到 编排 节点的"
+            f"分镜{len(shots) + 1} 插座上。"
+        )
 
     aspect = film.get("aspect") or settings.get("aspect", "adaptive")
     megapixels = film.get("megapixels", settings.get("megapixels", 0.5))
