@@ -673,6 +673,7 @@
         "options": {
           "face_sheet": "人脸身份表",
           "face_main": "主脸特写",
+          "face_pick": "指定第N脸",
           "center_square": "中心方裁",
           "passthrough": "原样"
         }
@@ -688,6 +689,10 @@
       },
       "confidence": {
         "name": "检测置信度"
+      },
+      "face_index": {
+        "name": "指定第几张脸",
+        "tooltip": "face_pick 模式取第几张脸（按人脸面积从大到小排序，1 = 最大的脸）。超出检出数时回落到最大的脸。"
       }
     },
     "outputs": {

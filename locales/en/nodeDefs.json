@@ -617,6 +617,7 @@
         "options": {
           "face_sheet": "Face sheet",
           "face_main": "Main face",
+          "face_pick": "Pick face N",
           "center_square": "Center square",
           "passthrough": "Passthrough"
         }
@@ -632,6 +633,9 @@
       },
       "confidence": {
         "name": "confidence"
+      },
+      "face_index": {
+        "name": "Face Index"
       }
     },
     "outputs": {

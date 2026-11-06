@@ -112,13 +112,19 @@ class MiniMaxH3ReferenceFocusGH(io.ComfyNode):
                 ),
                 io.Combo.Input(
                     "mode",
-                    options=["face_sheet", "face_main", "center_square", "passthrough"],
+                    options=["face_sheet", "face_main", "face_pick", "center_square", "passthrough"],
                     default="face_sheet",
                     tooltip=(
-                        "face_sheet = 检测人脸并把多张特写拼成一张身份表（参考能力最强）；"
-                        "face_main = 只保留最大的人脸特写；center_square = 中心方裁；"
-                        "passthrough = 原样输出。"
+                        "face_sheet = 多张特写拼成一张身份表（仅当照片里只有目标人物时用——"
+                        "多人合影会把别人也拼进去）；"
+                        "face_main = 最大人脸特写（单人照专用）；"
+                        "face_pick = 取第 N 大的人脸（多人合影里指定某个角色，配 face_index）；"
+                        "center_square = 中心方裁；passthrough = 原样输出。"
                     ),
+                ),
+                io.Int.Input(
+                    "face_index", default=1, min=1, max=9, step=1,
+                    tooltip="face_pick 模式取第几张脸（按人脸面积从大到小排序，1 = 最大的脸）。超出检出数时回落到最大的脸。",
                 ),
                 io.Int.Input(
                     "faces", default=4, min=1, max=6, step=1,
@@ -147,11 +153,12 @@ class MiniMaxH3ReferenceFocusGH(io.ComfyNode):
 
     @classmethod
     def execute(cls, image, mode="face_sheet", faces=4, margin=1.4,
-                cell=512, confidence=0.5):
+                cell=512, confidence=0.5, face_index=1):
         source = image[0].detach().to("cpu").clamp(0, 1).mul(255.0).round().to(torch.uint8).numpy()
         cell = max(64, int(cell))
         margin = max(1.0, float(margin))
         max_faces = max(1, int(faces))
+        face_index = max(1, int(face_index))
 
         if mode == "passthrough":
             return io.NodeOutput(image[:1].clone())
@@ -160,7 +167,7 @@ class MiniMaxH3ReferenceFocusGH(io.ComfyNode):
             return io.NodeOutput(_to_tensor(_center_square(source, cell)))
 
         crops: list[np.ndarray] = []
-        if mode in ("face_sheet", "face_main"):
+        if mode in ("face_sheet", "face_main", "face_pick"):
             try:
                 boxes = detect_faces(source, confidence)
             except Exception as error:
@@ -175,6 +182,15 @@ class MiniMaxH3ReferenceFocusGH(io.ComfyNode):
                 )
             if mode == "face_main":
                 boxes = boxes[:1]
+            elif mode == "face_pick":
+                if face_index <= len(boxes):
+                    boxes = [boxes[face_index - 1]]
+                else:
+                    logging.warning(
+                        "[LKH3] 参考聚焦：只检出 %d 张脸，要第 %d 张——回落到最大的脸。",
+                        len(boxes), face_index,
+                    )
+                    boxes = boxes[:1]
             else:
                 boxes = boxes[:max_faces]
             h, w = source.shape[:2]
