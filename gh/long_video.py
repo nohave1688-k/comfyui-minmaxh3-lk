@@ -1382,6 +1382,7 @@ class MiniMaxH3SegmentGuiderGH(io.ComfyNode):
         if audio_vae is not None:
             plan["audio_vae"] = audio_vae
         start = int(plan["range"]["start"]) - 1
+        end = int(plan["range"]["end"]) - 1
         # Pre-build the first executed shot's conditioning once: the loop
         # reuses it (no double work) and it doubles as the conditioning output
         # for a downstream second-pass BasicGuider.
