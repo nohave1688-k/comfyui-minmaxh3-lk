@@ -56,6 +56,7 @@ NODE_CLASS_MAPPINGS = {
     "LKH3AVDecode": _gh_audio_ops.MiniMaxH3AVDecodeGH,
     "LKH3SegmentGuider": _gh_long_video.MiniMaxH3SegmentGuiderGH,
     "LKH3AVTemplate": _gh_long_video.MiniMaxH3AVTemplateGH,
+    "LKH3FilmPrompt": _gh_nodes.MiniMaxH3FilmPromptGH,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -70,6 +71,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LKH3AVDecode": "MiniMax-H3 AV解码（LK）",
     "LKH3SegmentGuider": "MiniMax-H3 分段引导（LK）",
     "LKH3AVTemplate": "MiniMax-H3 空白AV模板（LK）",
+    "LKH3FilmPrompt": "MiniMaxH3全片提示词设置（LK）",
 }
 
 # LoRA list for the per-segment LoRA slots.  ``folder_paths`` is resolved at

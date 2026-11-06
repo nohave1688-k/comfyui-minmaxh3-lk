@@ -554,12 +554,67 @@ class MiniMaxH3IntegrationGH(io.ComfyNode):
         return io.NodeOutput(plan)
 
 
-class MiniMaxH3SettingsGH(io.ComfyNode):
-    """Global model/canvas settings for the two-node long-video chain.
+class MiniMaxH3FilmPromptGH(io.ComfyNode):
+    """Whole-film settings: one shared prompt block plus canvas/audio knobs.
 
-    Pairs with :class:`MiniMaxH3ShotsGH`: connect this node's output to the
-    shots node's ``settings`` input.  Model weights themselves stay external
-    and are lazy-loaded by the sampler.
+    The film prompt is prepended to every shot's prompt by the 分镜合成 node —
+    subject definitions, style blocks and <Picture n> tags belong here once
+    instead of being duplicated per shot.  These are film-level knobs, which is
+    why they no longer live on the 模型设置 node.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LKH3FilmPrompt",
+            display_name="MiniMaxH3全片提示词设置（LK）",
+            category=NODE_CATEGORY,
+            description="Whole-film prompt block and canvas/audio settings; connect to the 分镜合成 node.",
+            inputs=[
+                io.String.Input(
+                    "film_prompt",
+                    multiline=True,
+                    dynamic_prompts=True,
+                    default="",
+                    tooltip="拼接到每个镜头提示词前面的全片内容（主体定义、风格块、<Picture n> 标签）。留空则不追加。",
+                ),
+                io.Combo.Input("aspect", options=list(ASPECTS), default="adaptive"),
+                io.Float.Input("megapixels", default=0.5, min=0.2, max=2.0, step=0.1, round=0.1),
+                io.Combo.Input(
+                    "ref_image_size",
+                    options=["match", "1.2x", "1.5x", "2x", "max"],
+                    default="match",
+                ),
+                io.Combo.Input(
+                    "audio_mode",
+                    options=["lock_source", "reference_only", "native"],
+                    default="lock_source",
+                ),
+            ],
+            outputs=[
+                io.Custom("LK_H3_FILM_PROMPT").Output(
+                    display_name="全片提示词设置",
+                    tooltip="Connect to the MiniMaxH3分镜合成 node's 全片提示词设置 input.",
+                ),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, film_prompt, aspect, megapixels, ref_image_size, audio_mode):
+        return io.NodeOutput({
+            "film_prompt": film_prompt or "",
+            "aspect": aspect,
+            "megapixels": megapixels,
+            "ref_image_size": ref_image_size,
+            "audio_mode": audio_mode,
+        })
+
+
+class MiniMaxH3SettingsGH(io.ComfyNode):
+    """Model selection for the long-video chain: CLIP/VAE as links.
+
+    Canvas and audio knobs moved to :class:`MiniMaxH3FilmPromptGH` (they are
+    film-level, not model-level); this node keeps model selection only.
     """
 
     @classmethod
@@ -611,17 +666,22 @@ class MiniMaxH3SettingsGH(io.ComfyNode):
                     "audio_vae", display_name="音频 VAE",
                     tooltip="Selected audio VAE as a link — feed the long-video sampler's 音频 VAE input or the AV 解码 node.",
                 ),
+                io.Custom("CLIP").Output(
+                    "clip", display_name="CLIP",
+                    tooltip="Selected CLIP as a link — feed the long-video sampler / 分段引导's CLIP input (text encoding).",
+                ),
             ],
         )
 
     @classmethod
     def execute(cls, clip_name, video_vae_name, audio_vae_name, aspect, megapixels,
                 ref_image_size, audio_mode):
-        # VAELoader caches by name, so these are the same objects the plan
+        # Loaders cache by name, so these are the same objects the plan
         # builder / sampler would load — linking them just makes the wiring
-        # explicit and lets downstream decode nodes reuse them.
+        # explicit and lets downstream nodes reuse them.
         video_vae = nodes.VAELoader().load_vae(video_vae_name)[0] if video_vae_name else None
         audio_vae = nodes.VAELoader().load_vae(audio_vae_name)[0] if audio_vae_name else None
+        clip = nodes.CLIPLoader().load_clip(clip_name, "minimax")[0] if clip_name else None
         return io.NodeOutput({
             "clip_name": clip_name,
             "video_vae_name": video_vae_name,
@@ -630,7 +690,7 @@ class MiniMaxH3SettingsGH(io.ComfyNode):
             "megapixels": megapixels,
             "ref_image_size": ref_image_size,
             "audio_mode": audio_mode,
-        }, video_vae, audio_vae)
+        }, video_vae, audio_vae, clip)
 
 
 class MiniMaxH3ShotsGH(io.ComfyNode):
@@ -644,7 +704,14 @@ class MiniMaxH3ShotsGH(io.ComfyNode):
             io.Custom("LK_H3_SETTINGS").Input(
                 "settings",
                 display_name="模型设置",
-                tooltip="Connect the MiniMaxH3模型设置 node output.",
+                optional=True,
+                tooltip="Optional: MiniMaxH3模型设置 output — legacy fallback for the CLIP name and canvas/audio knobs. Canvas/audio now live on the 全片提示词设置 node; CLIP can be linked straight to the sampler.",
+            ),
+            io.Custom("LK_H3_FILM_PROMPT").Input(
+                "film_prompt",
+                display_name="全片提示词设置",
+                optional=True,
+                tooltip="MiniMaxH3全片提示词设置 output: one shared prompt block (subject definitions, <Picture n> tags) prepended to every shot, plus canvas/audio settings.",
             ),
             io.Boolean.Input(
                 "latent_continue",
@@ -682,14 +749,15 @@ class MiniMaxH3ShotsGH(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, settings, latent_continue=True, range_start=1, range_end=1,
+    def execute(cls, settings=None, film_prompt=None, latent_continue=True,
+                range_start=1, range_end=1,
                 shot_1=None, shot_2=None, shot_3=None, shot_4=None,
                 shot_5=None, shot_6=None, shot_7=None, shot_8=None):
         shots = [shot for shot in (shot_1, shot_2, shot_3, shot_4,
                                    shot_5, shot_6, shot_7, shot_8)
                  if shot is not None]
         plan = build_plan_from_shot_nodes(
-            settings=settings, shots=shots,
+            settings=settings, film_settings=film_prompt, shots=shots,
             latent_continue=latent_continue, range_start=range_start, range_end=range_end,
         )
         return io.NodeOutput(plan)

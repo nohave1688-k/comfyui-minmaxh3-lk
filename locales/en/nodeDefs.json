@@ -159,6 +159,12 @@
       },
       "sampler_settings": {
         "name": "Sampler Settings"
+      },
+      "clip": {
+        "name": "CLIP",
+        "tooltip": {
+          "name": "CLIP"
+        }
       }
     },
     "outputs": {
@@ -222,6 +228,9 @@
       "2": {
         "name": "Audio VAE",
         "tooltip": "Selected audio VAE as a link — feed the long-video sampler's 音频 VAE input or the AV 解码 node."
+      },
+      "3": {
+        "name": "CLIP"
       }
     }
   },
@@ -287,7 +296,7 @@
     "description": "Collects ordered MiniMaxH3 Shot nodes with the model settings and emits the segment plan for the sampler.",
     "inputs": {
       "settings": {
-        "name": "settings"
+        "name": "Model Settings (optional)"
       },
       "latent_continue": {
         "name": "latent continue"
@@ -321,6 +330,9 @@
       },
       "shot_8": {
         "name": "shot 8"
+      },
+      "film_prompt": {
+        "name": "Film Prompt"
       }
     },
     "outputs": {
@@ -453,6 +465,9 @@
       },
       "audio_vae": {
         "name": "音频 VAE"
+      },
+      "clip": {
+        "name": "CLIP"
       }
     },
     "outputs": {
@@ -478,6 +493,34 @@
       "0": {
         "name": "AV 潜空间",
         "tooltip": "整段空白 AV 模板（含 lk_layout 布局）— 接 双钟采样/T8契约 的 av_latent 和 SamplerCustomAdvanced 的 latent_image。"
+      }
+    }
+  },
+  "LKH3FilmPrompt": {
+    "display_name": "MiniMaxH3 Whole-Film Prompt (LK)",
+    "description": "Whole-film settings: one shared prompt block prepended to every shot, plus canvas/audio knobs.",
+    "inputs": {
+      "film_prompt": {
+        "name": "Film Prompt",
+        "tooltip": "Prepended to every shot prompt. Leave empty to skip."
+      },
+      "aspect": {
+        "name": "Aspect"
+      },
+      "megapixels": {
+        "name": "Megapixels"
+      },
+      "ref_image_size": {
+        "name": "Ref Image Size"
+      },
+      "audio_mode": {
+        "name": "Audio Mode"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "Film Settings",
+        "tooltip": "Connect to the 分镜合成 node."
       }
     }
   }

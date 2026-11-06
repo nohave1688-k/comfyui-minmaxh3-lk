@@ -159,6 +159,10 @@
       },
       "sampler_settings": {
         "name": "采样设置"
+      },
+      "clip": {
+        "name": "CLIP",
+        "tooltip": "CLIP（从 MiniMaxH3模型设置 节点的 CLIP 输出连线），用于逐镜条件构建。未连接时按模型设置里的名字加载。"
       }
     },
     "outputs": {
@@ -268,6 +272,10 @@
       "2": {
         "name": "音频 VAE",
         "tooltip": "所选音频 VAE 连线输出 — 接长视频分段的 音频 VAE 或 AV解码 节点。"
+      },
+      "3": {
+        "name": "CLIP",
+        "tooltip": "所选 CLIP 连线输出 — 接长视频采样/分段引导 的 CLIP 输入。"
       }
     }
   },
@@ -333,7 +341,7 @@
     "description": "按连接顺序收集 MiniMaxH3分镜 节点，与模型设置一起组成长视频分镜计划，输出接长视频采样节点。",
     "inputs": {
       "settings": {
-        "name": "模型设置"
+        "name": "模型设置（可选）"
       },
       "latent_continue": {
         "name": "潜空间续接"
@@ -367,6 +375,10 @@
       },
       "shot_8": {
         "name": "分镜 8"
+      },
+      "film_prompt": {
+        "name": "全片提示词设置",
+        "tooltip": "MiniMaxH3全片提示词设置 输出：共享提示词块（主体定义、<Picture n> 标签）拼进每个镜头，外加画布/音频设置。"
       }
     },
     "outputs": {
@@ -499,6 +511,10 @@
       },
       "audio_vae": {
         "name": "音频 VAE"
+      },
+      "clip": {
+        "name": "CLIP",
+        "tooltip": "CLIP（从 MiniMaxH3模型设置 节点的 CLIP 输出连线），用于逐镜条件构建。未连接时按模型设置名字加载。"
       }
     },
     "outputs": {
@@ -524,6 +540,34 @@
       "0": {
         "name": "AV 潜空间",
         "tooltip": "整段空白 AV 模板（含 lk_layout 布局）— 接 双钟采样/T8契约 的 av_latent 和 SamplerCustomAdvanced 的 latent_image。"
+      }
+    }
+  },
+  "LKH3FilmPrompt": {
+    "display_name": "MiniMaxH3全片提示词设置（LK）",
+    "description": "全片级设置：一段共享提示词（主体定义、风格块、<Picture n> 标签）拼接到每个镜头前面，外加画布与音频模式。这些是全片级参数，不属于模型设置。",
+    "inputs": {
+      "film_prompt": {
+        "name": "全片提示词",
+        "tooltip": "拼接到每个镜头提示词前面的全片内容（主体定义、风格块、<Picture n> 标签）。留空则不追加。"
+      },
+      "aspect": {
+        "name": "宽高比例"
+      },
+      "megapixels": {
+        "name": "百万像素"
+      },
+      "ref_image_size": {
+        "name": "参考素材尺寸"
+      },
+      "audio_mode": {
+        "name": "音频参考模式"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "全片提示词设置",
+        "tooltip": "连接到 MiniMaxH3分镜合成 的 全片提示词设置 输入。"
       }
     }
   }

@@ -605,20 +605,25 @@ def _persist_shot_media(shot, idx):
     return media
 
 
-def build_plan_from_shot_nodes(*, settings, shots, latent_continue=True,
-                               range_start=1, range_end=1):
+def build_plan_from_shot_nodes(*, settings=None, shots, film_settings=None,
+                               latent_continue=True, range_start=1, range_end=1):
     """Assemble the long-video plan from LKH3Settings + ordered LKH3Shot nodes.
 
+    ``settings`` (模型设置) is optional legacy fallback: it only contributes the
+    CLIP name plus canvas/audio knobs when the 全片提示词设置 node is absent.
+    ``film_settings`` (全片提示词设置) supplies the whole-film prompt block —
+    prepended to every shot's prompt — and overrides the canvas/audio knobs.
     Each shot dict carries its own media as tensors (first_frame, last_frame,
     images/videos/audios lists) which are routed through the
     ``connected_by_segment`` tensor channel for this pack's samplers; the same
     media is also materialized as temp-directory files referenced by name in
     the segment entries, which is the channel the lanxi pack's sampler reads
     (its loaders go through ``folder_paths.get_annotated_filepath``).  CLIP
-    stays None (the samplers lazy-load it); both VAEs are loaded here.
+    stays None (the samplers take it as a link or lazy-load it); both VAEs are
+    loaded here when names are available.
     """
-    if not isinstance(settings, dict) or not settings:
-        raise ValueError("请先连接「MiniMaxH3模型设置」节点：分镜合成需要模型设置输入。")
+    settings = settings if isinstance(settings, dict) else {}
+    film = film_settings if isinstance(film_settings, dict) else {}
     if not isinstance(shots, (list, tuple)) or not shots:
         raise ValueError("至少连接一个「MiniMaxH3分镜」节点到分镜合成节点。")
 
@@ -630,13 +635,12 @@ def build_plan_from_shot_nodes(*, settings, shots, latent_continue=True,
     if start > end:
         start, end = end, start
 
-    aspect = settings.get("aspect", "adaptive")
-    megapixels = settings.get("megapixels", 0.5)
+    aspect = film.get("aspect") or settings.get("aspect", "adaptive")
+    megapixels = film.get("megapixels", settings.get("megapixels", 0.5))
     clip_name = settings.get("clip_name")
     video_vae_name = settings.get("video_vae_name")
     audio_vae_name = settings.get("audio_vae_name")
-    if not clip_name:
-        raise ValueError("模型设置节点未提供 CLIP 模型，请在设置节点上选择。")
+    film_prompt = str(film.get("film_prompt") or "").strip()
 
     segments, connected_by_segment = [], {}
     for i, shot in enumerate(shots[:MAX_SEGMENTS]):
@@ -646,9 +650,11 @@ def build_plan_from_shot_nodes(*, settings, shots, latent_continue=True,
             duration = max(MIN_DURATION, min(MAX_DURATION, int(shot.get("duration") or 5)))
         except (TypeError, ValueError):
             duration = 5
+        shot_prompt = str(shot.get("prompt") or "").strip()
+        prompt = f"{film_prompt}\n\n{shot_prompt}".strip() if film_prompt else shot_prompt
         segments.append({
             "duration": duration,
-            "prompt": str(shot.get("prompt") or ""),
+            "prompt": prompt,
             "length": _media().calculate_length(duration),
             "mods": _clamp_shot_mods(shot.get("mods")),
             "loras": _clamp_shot_loras(shot.get("loras")),
@@ -683,10 +689,10 @@ def build_plan_from_shot_nodes(*, settings, shots, latent_continue=True,
         "audio_vae_name": audio_vae_name,
         "aspect": aspect,
         "megapixels": megapixels,
-        "audio_mode": settings.get("audio_mode", "native"),
+        "audio_mode": film.get("audio_mode") or settings.get("audio_mode", "lock_source"),
         "audio_denoise_strength": 0.0,
         "strict_prompt_tags": False,
-        "ref_image_size": settings.get("ref_image_size", "match"),
+        "ref_image_size": film.get("ref_image_size") or settings.get("ref_image_size", "match"),
         "clip": None,
         "video_vae": video_vae,
         "audio_vae": audio_vae,
@@ -762,6 +768,10 @@ def build_plan_from_shots(*, settings, segments_json, latent_continue=True,
 
 
 def _load_clip(plan):
+    if not plan.get("clip_name"):
+        raise ValueError(
+            "CLIP 未就绪：请把模型设置节点的 CLIP 连线到采样节点，或在模型设置里选择 CLIP 名称。"
+        )
     clip = comfy_nodes.CLIPLoader().load_clip(plan["clip_name"], "minimax")[0]
     plan["clip"] = clip
     return clip
@@ -1049,14 +1059,15 @@ def _sample_bundle(model, bundle, *, steps, shift_video, shift_audio,
 def run_long_video(model, segments, *, steps, shift_video, shift_audio,
                    sampler_name, scheduler, seed, seed_policy, cfg, release_clip,
                    free_between_segments, context_noise=0.0,
-                   video_vae=None, audio_vae=None, prebuilt=None,
+                   video_vae=None, audio_vae=None, clip=None, prebuilt=None,
                    external_noise=None, external_sigmas=None, external_sampler=None):
     plan = segments
     if not isinstance(plan, dict) or not plan.get("segments"):
         raise ValueError("Connect the storyboard node's 'segments' output to the long video sampler.")
-    # Linked VAEs (from the settings node's 视频/音频 VAE outputs) override the
-    # name-based loading the plan builder performed, so conditioning and any
-    # downstream decode chain see exactly these objects.
+    # Linked CLIP/VAEs override the name-based loading the plan builder
+    # performed, so conditioning sees exactly these objects.
+    if clip is not None:
+        plan["clip"] = clip
     if video_vae is not None:
         plan["video_vae"] = video_vae
     if audio_vae is not None:
@@ -1364,6 +1375,10 @@ class MiniMaxH3SegmentGuiderGH(io.ComfyNode):
                     "audio_vae", optional=True, display_name="音频 VAE",
                     tooltip="音频 VAE（从 MiniMaxH3模型设置 节点连线）。未连接时按模型设置名字加载。",
                 ),
+                io.Custom("CLIP").Input(
+                    "clip", optional=True, display_name="CLIP",
+                    tooltip="CLIP（从 MiniMaxH3模型设置 节点的 CLIP 输出连线），用于逐镜条件构建。未连接时按模型设置名字加载。",
+                ),
             ],
             outputs=[
                 io.Guider.Output(
@@ -1381,10 +1396,12 @@ class MiniMaxH3SegmentGuiderGH(io.ComfyNode):
     def execute(cls, model, segments, steps, shift_video, shift_audio, seed,
                 seed_policy, context_noise, cfg,
                 release_clip=True, free_between_segments=True,
-                video_vae=None, audio_vae=None):
+                video_vae=None, audio_vae=None, clip=None):
         plan = segments
         if not isinstance(plan, dict) or not plan.get("segments"):
             raise ValueError("Connect the storyboard node's 'segments' output to the segment guider.")
+        if clip is not None:
+            plan["clip"] = clip
         if video_vae is not None:
             plan["video_vae"] = video_vae
         if audio_vae is not None:
@@ -1507,6 +1524,10 @@ class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):
                     "audio_vae", optional=True, display_name="音频 VAE",
                     tooltip="音频 VAE（从 MiniMaxH3模型设置 节点的 音频 VAE 输出连线）。未连接时按模型设置里的名字加载。",
                 ),
+                io.Custom("CLIP").Input(
+                    "clip", optional=True, display_name="CLIP",
+                    tooltip="CLIP（从 MiniMaxH3模型设置 节点的 CLIP 输出连线），用于逐镜条件构建。未连接时按模型设置里的名字加载。",
+                ),
             ],
             outputs=[
                 io.Latent.Output(
@@ -1530,7 +1551,7 @@ class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):
     )
 
     @classmethod
-    def execute(cls, model, segments, video_vae=None, audio_vae=None,
+    def execute(cls, model, segments, video_vae=None, audio_vae=None, clip=None,
                 steps=4, shift_video=12.0, shift_audio=3.0,
                 sampler_name=DEFAULT_SAMPLER_NAME, scheduler=DEFAULT_SCHEDULER_NAME,
                 seed=0, seed_policy="increment", cfg=1.0, context_noise=0.0,
@@ -1555,7 +1576,7 @@ class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):
             seed=params["seed"], seed_policy=params["seed_policy"], cfg=params["cfg"],
             release_clip=release_clip, free_between_segments=free_between_segments,
             context_noise=params["context_noise"],
-            video_vae=video_vae, audio_vae=audio_vae,
+            video_vae=video_vae, audio_vae=audio_vae, clip=clip,
             external_noise=noise, external_sigmas=sigmas, external_sampler=sampler,
         ))
 
