@@ -212,6 +212,165 @@ def parse_segments(segments_json) -> dict:
     }
 
 
+
+
+def _segment_source_size(segment):
+    """Best-effort aspect source for the adaptive canvas."""
+    loader = _media()._load_image_file
+    if segment.get("first_frame"):
+        image = loader(segment["first_frame"])
+        if image is not None:
+            return int(image.shape[2]), int(image.shape[1])
+    for name in segment.get("images") or []:
+        image = loader(name)
+        if image is not None:
+            return int(image.shape[2]), int(image.shape[1])
+    return None, None
+
+
+def _video_soundtrack(frames, soundtrack, muted, duration_seconds):
+    if soundtrack is None or muted:
+        return None
+    from .core import align_frame_count_down
+    reference_duration = align_frame_count_down(int(frames.shape[0])) / 24.0
+    return _media()._trim_audio_to_duration(soundtrack, min(duration_seconds, reference_duration))
+
+
+def build_segment_bundle(plan, index, first_frame_override=None, clip=None, connected=None):
+    """Build one segment's conditioning bundle (also used for the ``>`` preview)."""
+    segments = plan["segments"]
+    segment = segments[index]
+    width, height = int(plan["width"]), int(plan["height"])
+    length = int(segment.get("length") or _media().calculate_length(segment["duration"]))
+    effective_duration = length / 24.0
+    loader = _media()
+    if clip is None:
+        clip = plan.get("clip") or _load_clip(plan)
+    # Connected media sockets override the panel's same-kind upload for this
+    # segment (replace, not append).
+    connected = connected or {}
+
+    if first_frame_override is not None:
+        first = first_frame_override[:1]
+    elif connected.get("first_frame") is not None:
+        first = connected["first_frame"][:1]
+    else:
+        first = loader._load_image_file(segment.get("first_frame") or "")
+    last = connected.get("last_frame")
+    if last is None:
+        last = loader._load_image_file(segment.get("last_frame") or "")
+
+    refs = {}
+    connected_images = connected.get("images")
+    if connected_images:
+        for image_index, image in enumerate(connected_images, 1):
+            refs[f"ref_image_{image_index}"] = image
+    else:
+        for image_index, name in enumerate(segment.get("images") or [], 1):
+            image = loader._load_image_file(name)
+            if image is not None:
+                refs[f"ref_image_{image_index}"] = image
+
+    ref_videos = {}
+    video_audio = {}
+    connected_videos = connected.get("videos")
+    if connected_videos:
+        for video_index, video in enumerate(connected_videos, 1):
+            frames, soundtrack = loader._load_video_object(video, length)
+            if frames is None:
+                continue
+            ref_videos[f"ref_video_{video_index}"] = frames
+            audio = _video_soundtrack(frames, soundtrack, False, effective_duration)
+            if audio is not None:
+                video_audio[f"ref_video_audio_{video_index}"] = audio
+    else:
+        for video_index, item in enumerate(segment.get("videos") or [], 1):
+            frames, soundtrack = loader._load_video_frames(item["name"], length)
+            if frames is None:
+                continue
+            ref_videos[f"ref_video_{video_index}"] = frames
+            audio = _video_soundtrack(frames, soundtrack, bool(item.get("muted")), effective_duration)
+            if audio is not None:
+                video_audio[f"ref_video_audio_{video_index}"] = audio
+
+    audios = {}
+    connected_audios = connected.get("audios")
+    if connected_audios:
+        for audio_index, audio in enumerate(connected_audios, 1):
+            audio = loader._trim_audio_to_duration(audio, effective_duration)
+            if audio is not None:
+                audios[f"ref_audio_{audio_index}"] = audio
+    else:
+        for audio_index, item in enumerate(segment.get("audios") or [], 1):
+            audio = loader._load_audio_file(item["name"])
+            selection = None
+            if item.get("trimEnd") is not None:
+                selection = (float(item.get("trimStart") or 0.0), float(item["trimEnd"]))
+            audio = loader._apply_audio_selection(audio, selection)
+            audio = loader._trim_audio_to_duration(audio, effective_duration)
+            if audio is not None:
+                audios[f"ref_audio_{audio_index}"] = audio
+
+    mods = load_visual_mods(segment.get("mods") or [])
+    ordered_drive = list(video_audio.values()) + list(audios.values())
+    drive_audio = ordered_drive[0] if ordered_drive else None
+    # The panel's global Audio reference mode controls every segment: the
+    # speaker only decides whether that reference video contributes Audio 1.
+    audio_mode = str(plan.get("audio_mode") or "lock_source")
+    if audio_mode not in {"lock_source", "reference_only", "native"}:
+        audio_mode = "lock_source"
+    if drive_audio is None:
+        audio_mode = "native"
+    add_source_as_reference = audio_mode != "native"
+    final_audio = loader._trim_audio_to_duration(drive_audio, effective_duration)
+
+    result = build_conditioning(
+        clip, plan["video_vae"], plan["audio_vae"],
+        segment.get("prompt") or "", width, height, length,
+        "auto", audio_mode, 0.0, add_source_as_reference,
+        False, plan.get("ref_image_size") or "match",
+        drive_audio, final_audio,
+        first, last, refs, ref_videos, video_audio, audios,
+        ref_mods=mods,
+    )
+    bundle = {
+        "positive": result[0], "av_latent": result[1], "mux_audio": result[2],
+        "conditioned_prompt": result[3], "media_map_json": result[4], "report": result[5],
+        "video_vae": plan["video_vae"], "audio_vae": plan["audio_vae"],
+        "width": width, "height": height, "length": length,
+        "duration_seconds": segment["duration"], "resolved_mode": "all_reference",
+        "is_original_audio": audio_mode == "lock_source",
+        "refmods": mods, "segment_index": index + 1, "prompt": segment.get("prompt") or "",
+    }
+    report = bundle.get("report") or ""
+    bundle["report"] = f"segment={index + 1}\n{report}".strip()
+    # Console visibility: what actually got packed for this shot. A prompt tag
+    # pointing at an unconnected slot (e.g. <Video 1> with no video reference)
+    # shows up here as a warning line — the model cannot reference media that
+    # was never packed.
+    logging.info(
+        "[LKH3] 镜头%d 条件打包: pictures=%d videos=%d audios=%d | %s",
+        index + 1,
+        len(refs),
+        len(ref_videos),
+        len(audios),
+        " | ".join(report.splitlines()[:10]),
+    )
+    return bundle
+
+
+def _connected_source_size(connected):
+    """Aspect source from connected socket tensors (overrides panel files)."""
+    first = connected.get("first_frame")
+    if first is not None:
+        return int(first.shape[2]), int(first.shape[1])
+    for image in connected.get("images") or []:
+        return int(image.shape[2]), int(image.shape[1])
+    return None, None
+
+
+
+
 def _clamp_shot_mods(raw_mods):
     mods = []
     for item in raw_mods or []:
@@ -903,6 +1062,59 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
         raise RuntimeError("Long video sampler produced no segments.")
     av_latent_out = _assemble_whole_av_latent(collected, audio_mode, latent_continue, start, end)
     return av_latent_out, first_positive
+
+
+
+
+def build_empty_plan_latent(plan, start, end):
+    """Whole-range empty AV template with the layout the segmented sampler
+    assembles (per-shot own-token spans, carry heads excluded).
+
+    Feeds contract nodes (双钟采样 / T8 sampler contracts) and
+    SamplerCustomAdvanced's ``latent_image`` without depending on the
+    sampler's own output, so external sampling recipes stay acyclic.
+    """
+    width, height = int(plan["width"]), int(plan["height"])
+    videos = []
+    audios = []
+    entries = []
+    video_offset = 0
+    audio_offset = 0
+    for index in range(start, end + 1):
+        segment = plan["segments"][index]
+        length = int(segment.get("length") or _media().calculate_length(segment["duration"]))
+        latent, _frames = empty_av_latent(width, height, length)
+        video, audio = nested_av_parts(latent)
+        tokens = int(video.shape[2])
+        audio_steps = int(audio.shape[-1])
+        videos.append(video.detach().to("cpu"))
+        audios.append(audio.detach().to("cpu"))
+        entries.append({
+            "segment": index + 1,
+            "video_offset": video_offset,
+            "video_tokens": tokens,
+            "audio_offset": audio_offset,
+            "audio_steps": audio_steps,
+            "frames": _pixel_frames_from_latent_t(tokens),
+        })
+        video_offset += tokens
+        audio_offset += audio_steps
+    video = torch.cat(videos, dim=2)
+    audio = torch.cat(audios, dim=-1)
+    return {
+        "samples": comfy.nested_tensor.NestedTensor((video, audio)),
+        "gh_h3_audio_mode": str(plan.get("audio_mode") or "native"),
+        "lk_layout": {
+            "version": 1,
+            "pass": "template",
+            "latent_continue": bool(plan.get("latent_continue", True)),
+            "range": {"start": start + 1, "end": end + 1},
+            "video_hw": [int(video.shape[3]), int(video.shape[4])],
+            "segments": entries,
+        },
+    }
+
+
 
 
 class _SegmentedAVGuider:
