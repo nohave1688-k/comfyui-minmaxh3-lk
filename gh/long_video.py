@@ -20,6 +20,7 @@ text encoder.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 
@@ -337,6 +338,18 @@ def build_segment_bundle(plan, index, first_frame_override=None, clip=None, conn
     }
     report = bundle.get("report") or ""
     bundle["report"] = f"segment={index + 1}\n{report}".strip()
+    # Console visibility: what actually got packed for this shot. A prompt tag
+    # pointing at an unconnected slot (e.g. <Video 1> with no video reference)
+    # shows up here as a warning line — the model cannot reference media that
+    # was never packed.
+    logging.info(
+        "[LKH3] 镜头%d 条件打包: pictures=%d videos=%d audios=%d | %s",
+        index + 1,
+        len(refs),
+        len(ref_videos),
+        len(audios),
+        " | ".join(report.splitlines()[:10]),
+    )
     return bundle
 
 
