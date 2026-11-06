@@ -1599,3 +1599,243 @@ class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):
             external_noise=noise, external_sigmas=sigmas, external_sampler=sampler,
         ))
 
+
+def run_refine_segments(model, segments, refined_latent, *, steps, shift_video,
+                        shift_audio, sampler_name, scheduler, seed, seed_policy,
+                        cfg, release_clip, free_between_segments,
+                        audio_policy="keep", clip=None, video_vae=None,
+                        audio_vae=None, external_sigmas=None, external_noise=None,
+                        external_sampler=None):
+    """Segmented HD second pass: refine an upscaled whole-film AV latent one
+    shot at a time.
+
+    This is the long-video equivalent of the T8 two-pass HIGH stage.  The
+    first pass already made the film continuous, so there is no carry here —
+    each shot's span is sliced from the upscaled latent by ``lk_layout``,
+    re-conditioned at the UPSCALED canvas (references re-encoded in HD, the
+    HIGH-conditioning equivalent), sampled with the per-shot LoRA set and the
+    external refine schedule, and the spans are concatenated back.  With
+    ``audio_policy="keep"`` the first pass's audio is composited back
+    verbatim (the T8 ``legacy_policy`` equivalent) — audio is
+    resolution-independent, so the second pass must not rewrite it.
+    """
+    plan = segments
+    if not isinstance(plan, dict) or not plan.get("segments"):
+        raise ValueError("Connect the storyboard node's 'segments' output to the refine node.")
+    if not getattr(refined_latent.get("samples", None), "is_nested", False):
+        raise ValueError("二跑精修需要放大后的嵌套 AV 潜空间（来自 AV潜空间放大 / 学习型放大器）。")
+    video, audio = nested_av_parts(refined_latent)
+    layout = refined_latent.get("lk_layout") or {}
+    entries = layout.get("segments") or []
+    start = int(plan["range"]["start"]) - 1
+    end = int(plan["range"]["end"]) - 1
+    span_count = end - start + 1
+    if len(entries) < span_count:
+        raise ValueError(
+            f"放大后的潜空间布局只有 {len(entries)} 个镜头段，但计划范围需要 {span_count} 段——"
+            "av_latent 必须来自同一分段计划的一采输出放大。"
+        )
+
+    # Per-shot conditioning must be built at the UPSCALED canvas so the
+    # reference images re-encode in HD (the HIGH-conditioning equivalent).
+    height = int(video.shape[3]) * 16
+    width = int(video.shape[4]) * 16
+    plan = dict(plan)
+    plan["width"] = width
+    plan["height"] = height
+    if clip is not None:
+        plan["clip"] = clip
+    if video_vae is not None:
+        plan["video_vae"] = video_vae
+    if audio_vae is not None:
+        plan["audio_vae"] = audio_vae
+
+    lora_cache = _lora_cache()
+    clip_obj = plan.get("clip")
+    progress = None
+    if getattr(comfy.utils, "PROGRESS_BAR_ENABLED", True):
+        progress = comfy.utils.ProgressBar(max(1, int(steps)) * max(1, span_count))
+    collected = []
+    audio_mode = None
+    first_positive = None
+
+    for index in range(start, end + 1):
+        entry = entries[index - start]
+        v0, vt = int(entry["video_offset"]), int(entry["video_tokens"])
+        a0, at = int(entry["audio_offset"]), int(entry["audio_steps"])
+        seg_video = video[..., v0:v0 + vt, :, :]
+        seg_audio = audio[..., a0:a0 + at]
+
+        if clip_obj is None:
+            clip_obj = _load_clip(plan)
+        bundle = build_segment_bundle(
+            plan, index, first_frame_override=None, clip=clip_obj,
+            connected=(plan.get("connected_by_segment") or {}).get(index + 1),
+        )
+        if first_positive is None:
+            first_positive = bundle["positive"]
+        if release_clip and clip_obj is not None:
+            _release_clip(plan, clip_obj)
+            clip_obj = None
+
+        # Swap the template's samples for this shot's slice of the upscaled
+        # film; the template's metadata (audio mode, keyframe bookkeeping)
+        # stays so the sampler contract sees a consistent latent.
+        seg_latent = dict(bundle["av_latent"])
+        seg_latent["samples"] = comfy.nested_tensor.NestedTensor((seg_video, seg_audio))
+        bundle = dict(bundle)
+        bundle["av_latent"] = seg_latent
+
+        segment = plan["segments"][index]
+        seg_seed = int(seed) if seed_policy == "fixed" else int(seed) + (index - start)
+        seg_model = _apply_model_loras(model, segment.get("loras") or [], lora_cache)
+        samples = _sample_bundle(
+            seg_model, bundle,
+            steps=int(steps), shift_video=float(shift_video), shift_audio=float(shift_audio),
+            sampler_name=sampler_name, scheduler=scheduler, seed=seg_seed, cfg=float(cfg),
+            progress=progress,
+            external_noise=external_noise, external_sigmas=external_sigmas,
+            external_sampler=external_sampler,
+        )
+        out_video, out_audio = nested_av_parts(samples)
+        if audio_mode is None:
+            audio_mode = samples.get("gh_h3_audio_mode") or plan.get("audio_mode") or "native"
+        if audio_policy == "keep":
+            # Composite the first pass's audio back verbatim: the refine pass
+            # must not rewrite already-generated speech/ambience.
+            out_audio = seg_audio
+        collected.append({
+            "segment": index + 1,
+            "video": out_video.detach().to("cpu"),
+            "audio": out_audio.detach().to("cpu"),
+        })
+        del samples, seg_model
+        if free_between_segments:
+            try:
+                import comfy.model_management as model_management
+                model_management.soft_empty_cache()
+            except Exception:
+                pass
+
+    out_video = torch.cat([item["video"] for item in collected], dim=2)
+    out_audio = torch.cat([item["audio"] for item in collected], dim=-1)
+    out_entries = []
+    video_offset = 0
+    audio_offset = 0
+    for item, entry in zip(collected, entries[start:end + 1]):
+        tokens = int(item["video"].shape[2])
+        out_entries.append({
+            "segment": item["segment"],
+            "video_offset": video_offset,
+            "video_tokens": tokens,
+            "audio_offset": audio_offset,
+            "audio_steps": int(item["audio"].shape[-1]),
+            "frames": _pixel_frames_from_latent_t(tokens),
+        })
+        video_offset += tokens
+        audio_offset += int(item["audio"].shape[-1])
+    out = {
+        "samples": comfy.nested_tensor.NestedTensor((out_video, out_audio)),
+        "gh_h3_audio_mode": audio_mode or "native",
+        "lk_layout": {
+            "version": 1,
+            "pass": "second",
+            "latent_continue": bool(plan.get("latent_continue", True)),
+            "range": {"start": start + 1, "end": end + 1},
+            "video_hw": [int(out_video.shape[3]), int(out_video.shape[4])],
+            "segments": out_entries,
+        },
+    }
+    return out, first_positive
+
+
+class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LKH3RefineSegments",
+            display_name="MiniMax-H3 二跑分段精修（LK）",
+            category="LK/MiniMax H3 Integration",
+            description=(
+                "Segmented HD second pass: refines the upscaled whole-film AV latent one "
+                "shot at a time — per-shot conditioning re-encoded at the upscaled canvas "
+                "(the HIGH-conditioning equivalent), per-shot LoRA, external refine "
+                "schedule, first-pass audio kept verbatim."
+            ),
+            inputs=[
+                io.Latent.Input(
+                    "av_latent",
+                    tooltip="放大后的整条 AV 潜空间（含 lk_layout）— 来自 AV潜空间放大 或学习型放大器，其布局必须与分段计划一致。",
+                ),
+                io.Custom(SEGMENT_TYPE).Input("segments", display_name="segments"),
+                io.Model.Input("model"),
+                io.Int.Input("steps", default=5, min=1, max=1000,
+                             tooltip="仅在未连接外部调度表时用于内置调度；接了 refine_sigmas 时忽略。"),
+                io.Float.Input("shift_video", default=12.0, min=0.01, max=100.0, step=0.01),
+                io.Float.Input("shift_audio", default=3.0, min=0.01, max=100.0, step=0.01),
+                io.Int.Input("seed", default=0, min=0, max=0xFFFFFFFFFFFFFFFF),
+                io.Combo.Input("seed_policy", options=["increment", "fixed"], default="fixed",
+                               tooltip="increment = 每镜种子+1；fixed = 全部镜头同一种子。"),
+                io.Combo.Input(
+                    "audio_policy", options=["keep", "regenerate"], default="keep",
+                    tooltip="keep = 二跑完全保留一采生成的音频（等价 T8 的 legacy_policy）；regenerate = 音频随视频一起精修。",
+                ),
+                io.Float.Input("cfg", default=1.0, min=0.0, max=20.0, step=0.1),
+                io.Boolean.Input(
+                    "release_clip", default=True, advanced=True,
+                    tooltip="每镜条件构建后卸载文本编码器，下镜再加载。显存紧张保持开启。",
+                ),
+                io.Boolean.Input("free_between_segments", default=True, advanced=True),
+                io.Custom("CLIP").Input(
+                    "clip", optional=True, display_name="CLIP",
+                    tooltip="CLIP（从 MiniMaxH3模型设置 连线）。未连接时按模型设置名字加载。",
+                ),
+                io.Vae.Input(
+                    "video_vae", optional=True, display_name="视频 VAE",
+                    tooltip="视频 VAE（从 MiniMaxH3模型设置 连线）。未连接时按模型设置名字加载。",
+                ),
+                io.Vae.Input(
+                    "audio_vae", optional=True, display_name="音频 VAE",
+                    tooltip="音频 VAE（从 MiniMaxH3模型设置 连线）。未连接时按模型设置名字加载。",
+                ),
+                io.Sigmas.Input(
+                    "sigmas", optional=True, display_name="调度表",
+                    tooltip="精修调度表（如 T8 ParityPlan 的 refine_sigmas，或任意 σ 收敛到 0 的表）。未连接时用内置完整调度。",
+                ),
+                io.Noise.Input(
+                    "noise", optional=True, display_name="噪声",
+                    tooltip="外接 NOISE 原语（贡献每镜种子与噪声生成）。未连接时内置生成。",
+                ),
+                io.Sampler.Input(
+                    "sampler", optional=True, display_name="采样器",
+                    tooltip="可选外接采样器（如 T8 DetailMixer 的输出）。未连接时用内置双钟欧拉。",
+                ),
+            ],
+            outputs=[
+                io.Latent.Output(
+                    "av_latent", display_name="AV 潜空间",
+                    tooltip="整条高清 AV 潜空间（含 lk_layout）— 接 AV解码 出片。",
+                ),
+                io.Conditioning.Output(
+                    "conditioning", display_name="conditioning",
+                    tooltip="首镜的正向条件（高清画布重编码）— 供下游 guider 链使用。",
+                ),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, av_latent, segments, model, steps, shift_video, shift_audio,
+                seed, seed_policy, audio_policy, cfg,
+                release_clip=True, free_between_segments=True,
+                clip=None, video_vae=None, audio_vae=None,
+                sigmas=None, noise=None, sampler=None):
+        return io.NodeOutput(*run_refine_segments(
+            model, segments, av_latent,
+            steps=steps, shift_video=shift_video, shift_audio=shift_audio,
+            sampler_name=DEFAULT_SAMPLER_NAME, scheduler=DEFAULT_SCHEDULER_NAME,
+            seed=seed, seed_policy=seed_policy, cfg=cfg,
+            release_clip=release_clip, free_between_segments=free_between_segments,
+            audio_policy=audio_policy,
+            clip=clip, video_vae=video_vae, audio_vae=audio_vae,
+            external_sigmas=sigmas, external_noise=noise, external_sampler=sampler,
+        ))

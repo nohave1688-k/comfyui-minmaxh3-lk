@@ -582,5 +582,83 @@
         "tooltip": "连接到 MiniMaxH3分镜合成 的 全片提示词设置 输入。"
       }
     }
+  },
+  "LKH3RefineSegments": {
+    "display_name": "MiniMax-H3 二跑分段精修（LK）",
+    "description": "分段高清二跑：把放大后的整条 AV 潜空间逐镜切片精修——每镜在放大后画布上重编码参考（等价 T8 HIGH conditioning），逐镜 LoRA，外接精修调度表，一采音频原样保留。",
+    "inputs": {
+      "av_latent": {
+        "name": "AV 潜空间",
+        "tooltip": "放大后的整条 AV 潜空间（含 lk_layout）— 布局必须与分段计划一致。"
+      },
+      "segments": {
+        "name": "分段计划"
+      },
+      "model": {
+        "name": "模型"
+      },
+      "steps": {
+        "name": "步数",
+        "tooltip": "仅在未连接外部调度表时使用。"
+      },
+      "shift_video": {
+        "name": "视频偏移"
+      },
+      "shift_audio": {
+        "name": "音频偏移"
+      },
+      "seed": {
+        "name": "种子"
+      },
+      "seed_policy": {
+        "name": "分段种子策略"
+      },
+      "audio_policy": {
+        "name": "音频策略",
+        "options": {
+          "keep": "保留一采音频",
+          "regenerate": "随视频精修"
+        }
+      },
+      "cfg": {
+        "name": "CFG"
+      },
+      "release_clip": {
+        "name": "分段间释放文本编码器"
+      },
+      "free_between_segments": {
+        "name": "分段间释放缓存"
+      },
+      "clip": {
+        "name": "CLIP"
+      },
+      "video_vae": {
+        "name": "视频 VAE"
+      },
+      "audio_vae": {
+        "name": "音频 VAE"
+      },
+      "sigmas": {
+        "name": "调度表",
+        "tooltip": "精修调度表（如 T8 ParityPlan 的 refine_sigmas）。未连接时用内置完整调度。"
+      },
+      "noise": {
+        "name": "噪声"
+      },
+      "sampler": {
+        "name": "采样器",
+        "tooltip": "可选外接采样器（如 T8 DetailMixer 输出）。未连接时用内置双钟欧拉。"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "AV 潜空间",
+        "tooltip": "整条高清 AV 潜空间（含 lk_layout）— 接 AV解码 出片。"
+      },
+      "1": {
+        "name": "conditioning",
+        "tooltip": "首镜的正向条件（高清画布重编码）。"
+      }
+    }
   }
 }
