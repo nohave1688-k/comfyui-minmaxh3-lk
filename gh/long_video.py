@@ -1261,7 +1261,7 @@ class _SegmentedAVGuider:
     """
 
     def __init__(self, model_patcher, plan, *, steps, shift_video, shift_audio,
-                 sampler_name, scheduler, seed, seed_policy, cfg, context_noise,
+                 sampler_name, scheduler, seed_policy, context_noise,
                  release_clip, free_between_segments, video_vae, audio_vae, prebuilt):
         self.model_patcher = model_patcher
         self._plan = plan
@@ -1270,9 +1270,8 @@ class _SegmentedAVGuider:
         self._shift_audio = float(shift_audio)
         self._sampler_name = sampler_name or DEFAULT_SAMPLER_NAME
         self._scheduler = scheduler or DEFAULT_SCHEDULER_NAME
-        self._seed = int(seed)
         self._seed_policy = seed_policy
-        self._cfg = float(cfg)
+        self._cfg = 1.0  # H3 is distillation-trained; cfg > 1 breaks the trajectory
         self._context_noise = float(context_noise)
         self._release_clip = bool(release_clip)
         self._free_between_segments = bool(free_between_segments)
@@ -1286,7 +1285,7 @@ class _SegmentedAVGuider:
             self.model_patcher, self._plan,
             steps=self._steps, shift_video=self._shift_video, shift_audio=self._shift_audio,
             sampler_name=self._sampler_name, scheduler=self._scheduler,
-            seed=int(self._seed if seed is None else seed),
+            seed=int(seed) if seed is not None else 0,
             seed_policy=self._seed_policy, cfg=self._cfg,
             release_clip=self._release_clip, free_between_segments=self._free_between_segments,
             context_noise=self._context_noise,
@@ -1322,12 +1321,10 @@ class MiniMaxH3SegmentGuiderGH(io.ComfyNode):
                 io.Combo.Input("sampler_name", options=SAMPLER_OPTIONS, default=DEFAULT_SAMPLER_NAME,
                                tooltip="dual_clock_euler = 内置双钟欧拉；选标准采样器名则切 FLOW_AV 补丁。"),
                 io.Combo.Input("scheduler", options=SCHEDULER_OPTIONS, default=DEFAULT_SCHEDULER_NAME),
-                io.Int.Input("seed", default=0, min=0, max=0xFFFFFFFFFFFFFFFF),
                 io.Combo.Input("seed_policy", options=["increment", "fixed"], default="fixed",
-                               tooltip="increment = 每镜种子+1；fixed = 全部镜头同一种子。"),
+                               tooltip="increment = 每镜种子+1；fixed = 全部镜头同一种子。基础种子来自 SamplerCustomAdvanced 的噪声原语（RandomNoise 的种子）。"),
                 io.Float.Input("context_noise", default=0.0, min=0.0, max=1.0, step=0.05,
                                tooltip="接缝处对续接上下文帧加噪。0 完全保留上一镜尾帧。"),
-                io.Float.Input("cfg", default=1.0, min=0.0, max=20.0, step=0.1),
                 io.Boolean.Input(
                     "release_clip", default=True, advanced=True,
                     tooltip="每镜采样前卸载文本编码器，下镜条件构建时再加载。显存紧张保持开启。",
@@ -1368,8 +1365,8 @@ class MiniMaxH3SegmentGuiderGH(io.ComfyNode):
 
     @classmethod
     def execute(cls, model, segments, steps, shift_video, shift_audio,
-                sampler_name, scheduler, seed,
-                seed_policy, context_noise, cfg,
+                sampler_name, scheduler,
+                seed_policy, context_noise,
                 release_clip=True, free_between_segments=True,
                 video_vae=None, audio_vae=None, clip=None):
         plan = segments
@@ -1395,7 +1392,7 @@ class MiniMaxH3SegmentGuiderGH(io.ComfyNode):
             model, plan,
             steps=steps, shift_video=shift_video, shift_audio=shift_audio,
             sampler_name=sampler_name, scheduler=scheduler,
-            seed=seed, seed_policy=seed_policy, cfg=cfg, context_noise=context_noise,
+            seed_policy=seed_policy, context_noise=context_noise,
             release_clip=release_clip, free_between_segments=free_between_segments,
             video_vae=video_vae, audio_vae=audio_vae,
             prebuilt=(first_bundle, clip),
@@ -1533,9 +1530,9 @@ class MiniMaxH3LongVideoRunnerGH(io.ComfyNode):
         ))
 
 
-def run_refine_segments(model, segments, refined_latent, *, steps, shift_video,
-                        shift_audio, sampler_name, scheduler, seed, seed_policy,
-                        cfg, release_clip, free_between_segments,
+def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_steps,
+                        shift_video, shift_audio, sampler_name, scheduler, seed,
+                        seed_policy, cfg, release_clip, free_between_segments,
                         audio_policy="keep", clip=None, video_vae=None,
                         audio_vae=None, external_sigmas=None, external_noise=None,
                         external_sampler=None):
@@ -1547,10 +1544,14 @@ def run_refine_segments(model, segments, refined_latent, *, steps, shift_video,
     each shot's span is sliced from the upscaled latent by ``lk_layout``,
     re-conditioned at the UPSCALED canvas (references re-encoded in HD, the
     HIGH-conditioning equivalent), sampled with the per-shot LoRA set and the
-    external refine schedule, and the spans are concatenated back.  With
+    refine schedule, and the spans are concatenated back.  With
     ``audio_policy="keep"`` the first pass's audio is composited back
     verbatim (the T8 ``legacy_policy`` equivalent) — audio is
     resolution-independent, so the second pass must not rewrite it.
+
+    The refine schedule is computed internally as the tail of the full
+    ``base_steps`` schedule split at ``coarse_steps`` (9/4 -> 5 refine steps,
+    matching the T8 ParityPlan) when no external sigmas are wired.
     """
     plan = segments
     if not isinstance(plan, dict) or not plan.get("segments"):
@@ -1589,11 +1590,23 @@ def run_refine_segments(model, segments, refined_latent, *, steps, shift_video,
         if isinstance(obj_seed, int):
             seed = obj_seed
 
+    if external_sigmas is None:
+        # Self-computed refine schedule: the full base schedule split at the
+        # coarse cutoff (9/4 -> the remaining 5 sigmas down to 0), matching
+        # the T8 ParityPlan without the external contract/plan nodes.
+        coarse = max(1, min(int(coarse_steps), int(base_steps) - 1))
+        _patched, _sampler, full_schedule = setup_dual_clock_sampling_gh(
+            model, refined_latent, int(base_steps), float(shift_video),
+            float(shift_audio), sampler_name or DEFAULT_SAMPLER_NAME,
+            scheduler or DEFAULT_SCHEDULER_NAME,
+        )
+        external_sigmas = full_schedule[int(coarse):]
+
     lora_cache = _lora_cache()
     clip_obj = plan.get("clip")
     progress = None
     if getattr(comfy.utils, "PROGRESS_BAR_ENABLED", True):
-        progress = comfy.utils.ProgressBar(max(1, int(steps)) * max(1, span_count))
+        progress = comfy.utils.ProgressBar(max(1, int(base_steps) - max(1, int(coarse_steps))) * max(1, span_count))
     collected = []
     audio_mode = None
     first_positive = None
@@ -1667,7 +1680,7 @@ def run_refine_segments(model, segments, refined_latent, *, steps, shift_video,
         seg_model = _apply_model_loras(model, segment.get("loras") or [], lora_cache)
         samples = _sample_bundle(
             seg_model, bundle,
-            steps=int(steps), shift_video=float(shift_video), shift_audio=float(shift_audio),
+            steps=int(base_steps), shift_video=float(shift_video), shift_audio=float(shift_audio),
             sampler_name=sampler_name, scheduler=scheduler, seed=seg_seed, cfg=float(cfg),
             progress=progress,
             external_noise=external_noise, external_sigmas=external_sigmas,
@@ -1751,18 +1764,16 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
                 ),
                 io.Custom(SEGMENT_TYPE).Input("segments", display_name="segments"),
                 io.Model.Input("model"),
-                io.Int.Input("steps", default=5, min=1, max=1000,
-                             tooltip="仅在未连接外部调度表时用于内置调度；接了 refine_sigmas 时忽略。"),
                 io.Float.Input("shift_video", default=12.0, min=0.01, max=100.0, step=0.01),
                 io.Float.Input("shift_audio", default=3.0, min=0.01, max=100.0, step=0.01),
-                io.Int.Input("seed", default=0, min=0, max=0xFFFFFFFFFFFFFFFF),
-                io.Combo.Input("seed_policy", options=["increment", "fixed"], default="fixed",
-                               tooltip="increment = 每镜种子+1；fixed = 全部镜头同一种子。"),
+                io.Int.Input("base_steps", default=9, min=2, max=1000,
+                             tooltip="完整基础调度的步数（对应 T8 ParityPlan 的 base）。精修步数 = base - coarse。"),
+                io.Int.Input("coarse_steps", default=4, min=1, max=1000,
+                             tooltip="粗采 cutoff：基础调度从第 N 个 σ 起进入精修段（对应 T8 ParityPlan 的 coarse）。"),
                 io.Combo.Input(
                     "audio_policy", options=["keep", "regenerate"], default="keep",
                     tooltip="keep = 二跑完全保留一采生成的音频（等价 T8 的 legacy_policy）；regenerate = 音频随视频一起精修。",
                 ),
-                io.Float.Input("cfg", default=1.0, min=0.0, max=20.0, step=0.1),
                 io.Boolean.Input(
                     "release_clip", default=True, advanced=True,
                     tooltip="每镜条件构建后卸载文本编码器，下镜再加载。显存紧张保持开启。",
@@ -1806,16 +1817,17 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, av_latent, segments, model, steps, shift_video, shift_audio,
-                seed, seed_policy, audio_policy, cfg,
+    def execute(cls, av_latent, segments, model, shift_video, shift_audio,
+                base_steps, coarse_steps, audio_policy,
                 release_clip=True, free_between_segments=True,
                 clip=None, video_vae=None, audio_vae=None,
                 sigmas=None, noise=None, sampler=None):
         return io.NodeOutput(*run_refine_segments(
             model, segments, av_latent,
-            steps=steps, shift_video=shift_video, shift_audio=shift_audio,
+            base_steps=base_steps, coarse_steps=coarse_steps,
+            shift_video=shift_video, shift_audio=shift_audio,
             sampler_name=DEFAULT_SAMPLER_NAME, scheduler=DEFAULT_SCHEDULER_NAME,
-            seed=seed, seed_policy=seed_policy, cfg=cfg,
+            seed=0, seed_policy="fixed", cfg=1.0,
             release_clip=release_clip, free_between_segments=free_between_segments,
             audio_policy=audio_policy,
             clip=clip, video_vae=video_vae, audio_vae=audio_vae,

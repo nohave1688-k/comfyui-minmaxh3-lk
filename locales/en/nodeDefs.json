@@ -367,19 +367,13 @@
       "shift_audio": {
         "name": "音频偏移"
       },
-      "seed": {
-        "name": "种子"
-      },
       "seed_policy": {
         "name": "分段种子策略",
-        "tooltip": "increment = 每镜种子+1；fixed = 全部镜头同一种子。"
+        "tooltip": "Per-shot seed split of the base seed from the noise primitive."
       },
       "context_noise": {
         "name": "Context noise",
         "tooltip": "接缝处对续接上下文帧加噪。0 完全保留上一镜尾帧。"
-      },
-      "cfg": {
-        "name": "CFG"
       },
       "release_clip": {
         "name": "分段间释放文本编码器"
@@ -433,20 +427,11 @@
       "model": {
         "name": "模型"
       },
-      "steps": {
-        "name": "steps"
-      },
       "shift_video": {
         "name": "视频偏移"
       },
       "shift_audio": {
         "name": "音频偏移"
-      },
-      "seed": {
-        "name": "种子"
-      },
-      "seed_policy": {
-        "name": "Seed Policy"
       },
       "audio_policy": {
         "name": "Audio Policy",
@@ -454,9 +439,6 @@
           "keep": "Keep first-pass audio",
           "regenerate": "Refine with video"
         }
-      },
-      "cfg": {
-        "name": "CFG"
       },
       "release_clip": {
         "name": "Release CLIP"
@@ -481,6 +463,12 @@
       },
       "sampler": {
         "name": "Sampler"
+      },
+      "base_steps": {
+        "name": "base_steps"
+      },
+      "coarse_steps": {
+        "name": "coarse_steps"
       }
     },
     "outputs": {

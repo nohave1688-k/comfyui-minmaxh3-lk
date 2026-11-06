@@ -366,19 +366,13 @@
       "shift_audio": {
         "name": "音频偏移"
       },
-      "seed": {
-        "name": "种子"
-      },
       "seed_policy": {
         "name": "分段种子策略",
-        "tooltip": "increment = 每镜种子+1；fixed = 全部镜头同一种子。"
+        "tooltip": "increment = 每镜种子+1；fixed = 全部镜头同一种子。基础种子来自 SamplerCustomAdvanced 的噪声原语（RandomNoise 的种子）。"
       },
       "context_noise": {
         "name": "Context noise",
         "tooltip": "接缝处对续接上下文帧加噪。0 完全保留上一镜尾帧。"
-      },
-      "cfg": {
-        "name": "CFG"
       },
       "release_clip": {
         "name": "分段间释放文本编码器"
@@ -437,21 +431,11 @@
       "model": {
         "name": "模型"
       },
-      "steps": {
-        "name": "步数",
-        "tooltip": "仅在未连接外部调度表时使用。"
-      },
       "shift_video": {
         "name": "视频偏移"
       },
       "shift_audio": {
         "name": "音频偏移"
-      },
-      "seed": {
-        "name": "种子"
-      },
-      "seed_policy": {
-        "name": "分段种子策略"
       },
       "audio_policy": {
         "name": "音频策略",
@@ -459,9 +443,6 @@
           "keep": "保留一采音频",
           "regenerate": "随视频精修"
         }
-      },
-      "cfg": {
-        "name": "CFG"
       },
       "release_clip": {
         "name": "分段间释放文本编码器"
@@ -488,6 +469,14 @@
       "sampler": {
         "name": "采样器",
         "tooltip": "可选外接采样器（如 T8 DetailMixer 输出）。未连接时用内置双钟欧拉。"
+      },
+      "base_steps": {
+        "name": "基础步数",
+        "tooltip": "完整基础调度的步数（对应 T8 ParityPlan 的 base）。精修步数 = base - coarse。"
+      },
+      "coarse_steps": {
+        "name": "粗采步数",
+        "tooltip": "粗采 cutoff：基础调度从第 N 个 σ 起进入精修段（对应 T8 ParityPlan 的 coarse）。"
       }
     },
     "outputs": {
