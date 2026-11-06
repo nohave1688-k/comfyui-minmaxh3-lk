@@ -23,6 +23,7 @@ import json
 import logging
 import math
 import os
+import shutil
 
 import folder_paths
 import nodes as comfy_nodes
@@ -65,7 +66,10 @@ DEFAULT_OVERLAP = 20
 CARRY_TOKENS = 7
 CARRY_FRAMES = 22
 CARRY_AUDIO_STEPS = 36
-SEGMENT_TYPE = "LK_H3_SEGMENTS"
+# Shared with the lanxi pack on purpose: the storyboard node's plan must stay
+# connectable to BOTH packs' long-video samplers (and the lanxi studio's plan
+# to ours), so the socket type keeps the original LANXI id.
+SEGMENT_TYPE = "LANXI_H3_SEGMENTS"
 
 
 def _clamp_int(value, default, low, high):
@@ -486,16 +490,132 @@ def _clamp_shot_loras(raw_loras):
     return loras[:MAX_LORAS]
 
 
+def _save_image_temp(tensor, name) -> str:
+    """Save an IMAGE tensor [B,H,W,C] into ComfyUI's temp directory and return
+    the annotated name ([temp] suffix) that both packs' loaders resolve."""
+    from PIL import Image as PILImage
+    image = (
+        tensor[0].detach().to("cpu").clamp(0, 1).mul(255).round().to(torch.uint8).numpy()
+    )
+    path = os.path.join(folder_paths.get_temp_directory(), name)
+    PILImage.fromarray(image).save(path, format="PNG")
+    return f"{name} [temp]"
+
+
+def _save_audio_temp(audio, name) -> str:
+    """Save an AUDIO dict to the temp directory.  torchaudio.save may route to
+    the (often missing) TorchCodec backend on newer builds, so fall back to
+    soundfile and then to a plain stdlib WAV writer."""
+    path = os.path.join(folder_paths.get_temp_directory(), name)
+    waveform = audio["waveform"][0].detach().to("cpu").float()
+    sample_rate = int(audio.get("sample_rate") or 24000)
+    try:
+        import torchaudio
+        torchaudio.save(path, waveform, sample_rate)
+        return f"{name} [temp]"
+    except Exception:
+        pass
+    try:
+        import soundfile as sf
+        sf.write(path, waveform.numpy().T, sample_rate)
+        return f"{name} [temp]"
+    except Exception:
+        pass
+    import wave
+    import numpy as np
+    data = waveform.numpy()
+    if data.ndim == 1:
+        data = data[None, :]
+    interleaved = np.transpose(data).reshape(-1)
+    pcm = (np.clip(interleaved, -1.0, 1.0) * 32767.0).astype(np.int16)
+    with wave.open(path, "wb") as handle:
+        handle.setnchannels(int(data.shape[0]))
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        handle.writeframes(pcm.tobytes())
+    return f"{name} [temp]"
+
+
+def _video_source_path(video):
+    """Best-effort source path of a V3 VIDEO input (files only; in-memory
+    components cannot be referenced by name)."""
+    source = getattr(video, "get_stream_source", None)
+    if callable(source):
+        try:
+            source = source()
+        except Exception:
+            return None
+    return source if isinstance(source, str) and os.path.exists(source) else None
+
+
+def _persist_shot_media(shot, idx):
+    """Materialize a shot's linked tensor media as temp-directory files and
+    return the filename-keyed segment entries the lanxi sampler consumes —
+    its loaders resolve media by name through
+    ``folder_paths.get_annotated_filepath`` and cannot read tensors.  Our own
+    sampler ignores these entries while the tensor channel in
+    ``connected_by_segment`` carries content, so both samplers stay fed by the
+    same sockets."""
+    media = {}
+    first_frame = shot.get("first_frame")
+    if first_frame is not None:
+        try:
+            media["first_frame"] = _save_image_temp(first_frame, f"lk_shot{idx}_first.png")
+        except Exception as error:
+            logging.warning("[LKH3] 镜头%d first_frame 落盘失败: %s", idx, error)
+    last_frame = shot.get("last_frame")
+    if last_frame is not None:
+        try:
+            media["last_frame"] = _save_image_temp(last_frame, f"lk_shot{idx}_last.png")
+        except Exception as error:
+            logging.warning("[LKH3] 镜头%d last_frame 落盘失败: %s", idx, error)
+    images = []
+    for slot, image in enumerate(shot.get("images") or [], 1):
+        try:
+            images.append(_save_image_temp(image, f"lk_shot{idx}_img{slot}.png"))
+        except Exception as error:
+            logging.warning("[LKH3] 镜头%d 参考图%d 落盘失败: %s", idx, slot, error)
+    if images:
+        media["images"] = images
+    videos = []
+    for slot, video in enumerate(shot.get("videos") or [], 1):
+        source = _video_source_path(video)
+        if not source:
+            logging.warning(
+                "[LKH3] 镜头%d 参考视频%d 无法落盘（内存型视频没有源文件），lanxi 采样器将看不到它",
+                idx, slot,
+            )
+            continue
+        name = f"lk_shot{idx}_vid{slot}{os.path.splitext(source)[1] or '.mp4'}"
+        try:
+            shutil.copyfile(source, os.path.join(folder_paths.get_temp_directory(), name))
+            videos.append({"name": f"{name} [temp]", "muted": False})
+        except Exception as error:
+            logging.warning("[LKH3] 镜头%d 参考视频%d 拷贝失败: %s", idx, slot, error)
+    if videos:
+        media["videos"] = videos
+    audios = []
+    for slot, audio in enumerate(shot.get("audios") or [], 1):
+        try:
+            audios.append({"name": _save_audio_temp(audio, f"lk_shot{idx}_aud{slot}.wav")})
+        except Exception as error:
+            logging.warning("[LKH3] 镜头%d 参考音频%d 落盘失败: %s", idx, slot, error)
+    if audios:
+        media["audios"] = audios
+    return media
+
+
 def build_plan_from_shot_nodes(*, settings, shots, latent_continue=True,
                                range_start=1, range_end=1):
     """Assemble the long-video plan from LKH3Settings + ordered LKH3Shot nodes.
 
     Each shot dict carries its own media as tensors (first_frame, last_frame,
-    images/videos/audios lists) which are routed through the same
-    ``connected_by_segment`` channel the socket path uses, so
-    :func:`build_segment_bundle` consumes them unchanged.  CLIP stays None
-    (the sampler lazy-loads it); both VAEs are loaded here because the sampler
-    decodes with them directly.
+    images/videos/audios lists) which are routed through the
+    ``connected_by_segment`` tensor channel for this pack's samplers; the same
+    media is also materialized as temp-directory files referenced by name in
+    the segment entries, which is the channel the lanxi pack's sampler reads
+    (its loaders go through ``folder_paths.get_annotated_filepath``).  CLIP
+    stays None (the samplers lazy-load it); both VAEs are loaded here.
     """
     if not isinstance(settings, dict) or not settings:
         raise ValueError("请先连接「MiniMaxH3模型设置」节点：分镜合成需要模型设置输入。")
@@ -533,6 +653,7 @@ def build_plan_from_shot_nodes(*, settings, shots, latent_continue=True,
             "mods": _clamp_shot_mods(shot.get("mods")),
             "loras": _clamp_shot_loras(shot.get("loras")),
             "index": idx,
+            **_persist_shot_media(shot, idx),
         })
         connected_by_segment[idx] = {
             "first_frame": shot.get("first_frame"),
