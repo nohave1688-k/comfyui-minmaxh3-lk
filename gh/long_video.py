@@ -1590,6 +1590,23 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
             # upscaled layout's offsets 1:1.
             out_video = out_video[..., carry_t:, :, :]
             out_audio = out_audio[..., carry_a:]
+        if logging.getLogger().isEnabledFor(logging.INFO):
+            # Per-shot refinement delta: how far the sampled span moved from
+            # the upscaled input.  At denoise 0.30 the span should stay close
+            # to its input; a huge delta means the sampling path is not doing
+            # what the schedule says (noise/mask/pack corruption), a tiny delta
+            # with visible flicker points downstream of the sampler.
+            with torch.no_grad():
+                _in = seg_video.detach().float()
+                _out = out_video.detach().float()
+                _diff = (_out - _in).abs()
+                logging.info(
+                    "[LKH3] 精修镜头%d: 步数=%d 入口σ=%.4f | 输出-输入 |Δ|max=%.4f mean=%.4f | 输入std=%.4f 输出std=%.4f | 窗口=%s 裁剪=%d",
+                    index + 1, len(external_sigmas) - 1, float(external_sigmas[0]),
+                    float(_diff.max()), float(_diff.mean()),
+                    float(_in.std()), float(_out.std()),
+                    tuple(window_video.shape), carry_t,
+                )
         if audio_policy == "keep":
             # Composite the first pass's audio back verbatim AFTER the trim:
             # the sampled window carries the locked previous-tail audio only
