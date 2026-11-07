@@ -225,6 +225,13 @@
       "free_between_segments": {
         "name": "Free Cache"
       },
+      "carry_source": {
+        "name": "Carry Source",
+        "options": {
+          "anchor": "Anchor to first pass (no compounding)",
+          "chained": "Chain refined output"
+        }
+      },
       "clip": {
         "name": "CLIP"
       },
@@ -234,14 +241,8 @@
       "audio_vae": {
         "name": "音频 VAE"
       },
-      "sigmas": {
-        "name": "Sigmas"
-      },
       "noise": {
         "name": "噪声"
-      },
-      "sampler": {
-        "name": "Sampler"
       },
       "base_steps": {
         "name": "base_steps"

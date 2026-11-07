@@ -231,6 +231,13 @@
       "free_between_segments": {
         "name": "分段间释放缓存"
       },
+      "carry_source": {
+        "name": "续接来源",
+        "options": {
+          "anchor": "锚定首采（防逐镜复利）",
+          "chained": "链式精修（接缝最顺）"
+        }
+      },
       "clip": {
         "name": "CLIP"
       },
@@ -240,16 +247,8 @@
       "audio_vae": {
         "name": "音频 VAE"
       },
-      "sigmas": {
-        "name": "调度表",
-        "tooltip": "精修调度表（如 T8 ParityPlan 的 refine_sigmas）。未连接时用内置完整调度。"
-      },
       "noise": {
         "name": "噪声"
-      },
-      "sampler": {
-        "name": "采样器",
-        "tooltip": "可选外接采样器（如 T8 DetailMixer 输出）。未连接时用内置双钟欧拉。"
       },
       "base_steps": {
         "name": "基础步数",

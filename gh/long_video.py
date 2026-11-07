@@ -1295,7 +1295,7 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
                         seed_policy, cfg, release_clip, free_between_segments,
                         audio_policy="keep", clip=None, video_vae=None,
                         audio_vae=None, external_sigmas=None, external_noise=None,
-                        external_sampler=None):
+                        external_sampler=None, carry_source="anchor"):
     """Segmented HD second pass: refine an upscaled whole-film AV latent one
     shot at a time.
 
@@ -1397,41 +1397,73 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
         seg_latent = dict(bundle["av_latent"])
         seg_latent["samples"] = comfy.nested_tensor.NestedTensor((seg_video, seg_audio))
 
-        # Carry the previous shot's refined tail as an EXTENDED window head
+        # Carry the previous shot's tail as an EXTENDED window head
         # ([prev tail | own span], head locked at denoise-mask 0).  Unlike
         # pass 1's overwrite-style carry this must not consume the shot's own
         # tokens - the upscaled layout's span sizes are fixed and the assembled
         # film has to match them 1:1.  Per-shot windows otherwise refine blind,
         # and a high refine sigma re-asserts each shot's own prompt, breaking
         # the cross-shot continuity pass 1 established.
+        #
+        # ``carry_source`` picks where the head comes from:
+        # * "anchor"  - the previous shot's tail sliced from the UPSCALED
+        #   first-pass latent (fixed quality level).  The carried CONTENT is
+        #   identical in both modes - the previous shot's last frames; per-shot
+        #   references never enter the carry - so multi-reference films are
+        #   unaffected.  What changes is that the context quality no longer
+        #   depends on how the previous REFINED shots went, so pass-2 quality
+        #   cannot drift hop over hop (an 8-shot film refines every shot
+        #   against the same anchor instead of a 7-link quality chain).
+        # * "chained" - the previous shot's REFINED output (pre-anchor
+        #   behavior): the seam continues from exactly what the final film
+        #   shows there, at the cost of chaining every shot's quality to the
+        #   accumulated state of all previous refine hops.
         carry_t = carry_a = 0
-        if previous_samples is not None:
+        head_video = head_audio = None
+        tokens = audio_steps = 0
+        if carry_source != "chained" and index > start:
+            prev_entry = entries[index - 1 - start]
+            tokens = min(CARRY_TOKENS, int(prev_entry["video_tokens"]))
+            audio_steps = (
+                0 if audio_policy == "keep"
+                else min(CARRY_AUDIO_STEPS, int(prev_entry["audio_steps"]))
+            )
+            if tokens > 0:
+                pv0, pvt = int(prev_entry["video_offset"]), int(prev_entry["video_tokens"])
+                pa0, pat = int(prev_entry["audio_offset"]), int(prev_entry["audio_steps"])
+                head_video = video[..., pv0 + pvt - tokens:pv0 + pvt]
+                head_audio = (
+                    audio[..., pa0 + pat - audio_steps:pa0 + pat]
+                    if audio_steps > 0 else None
+                )
+        elif carry_source == "chained" and previous_samples is not None:
             prev_video, prev_audio = previous_samples.unbind()
             tokens = min(CARRY_TOKENS, int(prev_video.shape[2]))
             audio_steps = min(CARRY_AUDIO_STEPS, int(prev_audio.shape[-1])) if audio_policy != "keep" else 0
             if tokens > 0:
-                window_video = torch.cat(
-                    [prev_video[..., -tokens:, :, :].to(seg_video), seg_video], dim=2
-                )
-                window_audio = (
-                    torch.cat([prev_audio[..., -audio_steps:].to(seg_audio), seg_audio], dim=-1)
-                    if audio_steps > 0 else seg_audio
-                )
-                video_mask = torch.ones(
-                    (1, 1, window_video.shape[2], window_video.shape[3], window_video.shape[4]),
-                    device=window_video.device, dtype=torch.float32,
-                )
-                video_mask[..., :tokens, :, :] = 0.0
-                audio_mask = torch.ones(
-                    (1, 1, window_audio.shape[2], window_audio.shape[3]),
-                    device=window_audio.device, dtype=torch.float32,
-                )
-                if audio_steps > 0:
-                    audio_mask[..., :audio_steps] = 0.0
-                seg_latent = dict(seg_latent)
-                seg_latent["samples"] = comfy.nested_tensor.NestedTensor((window_video, window_audio))
-                seg_latent["noise_mask"] = comfy.nested_tensor.NestedTensor((video_mask, audio_mask))
-                carry_t, carry_a = tokens, audio_steps
+                head_video = prev_video[..., -tokens:, :, :]
+                head_audio = prev_audio[..., -audio_steps:] if audio_steps > 0 else None
+        if head_video is not None:
+            window_video = torch.cat([head_video.to(seg_video), seg_video], dim=2)
+            window_audio = (
+                torch.cat([head_audio.to(seg_audio), seg_audio], dim=-1)
+                if head_audio is not None else seg_audio
+            )
+            video_mask = torch.ones(
+                (1, 1, window_video.shape[2], window_video.shape[3], window_video.shape[4]),
+                device=window_video.device, dtype=torch.float32,
+            )
+            video_mask[..., :tokens, :, :] = 0.0
+            audio_mask = torch.ones(
+                (1, 1, window_audio.shape[2], window_audio.shape[3]),
+                device=window_audio.device, dtype=torch.float32,
+            )
+            if audio_steps > 0:
+                audio_mask[..., :audio_steps] = 0.0
+            seg_latent = dict(seg_latent)
+            seg_latent["samples"] = comfy.nested_tensor.NestedTensor((window_video, window_audio))
+            seg_latent["noise_mask"] = comfy.nested_tensor.NestedTensor((video_mask, audio_mask))
+            carry_t, carry_a = tokens, audio_steps
         bundle = dict(bundle)
         bundle["av_latent"] = seg_latent
 
@@ -1541,6 +1573,10 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
                     tooltip="每镜条件构建后卸载文本编码器，下镜再加载。显存紧张保持开启。",
                 ),
                 io.Boolean.Input("free_between_segments", default=True, advanced=True),
+                io.Combo.Input(
+                    "carry_source", options=["anchor", "chained"], default="anchor",
+                    tooltip="每镜续接上下文的来源。anchor = 取自放大的首采潜空间（固定质量锚点，逐镜不复利，8 镜以上全片质量均匀）；chained = 取上一镜的精修输出（接缝与精修结果严格连续，但逐镜链式累积）。两种模式的续接内容都是上一镜末帧——分镜各自参考不同图片不受影响，参考从不进入续接。",
+                ),
                 io.Custom("CLIP").Input(
                     "clip", optional=True, display_name="CLIP",
                     tooltip="CLIP（从 MiniMaxH3 长视频编排 连线）。未连接时按模型设置名字加载。",
@@ -1570,6 +1606,7 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
     def execute(cls, av_latent, segments, model, shift_video, shift_audio,
                 base_steps, coarse_steps, audio_policy,
                 release_clip=True, free_between_segments=True,
+                carry_source="anchor",
                 clip=None, video_vae=None, audio_vae=None,
                 noise=None):
         return io.NodeOutput(*run_refine_segments(
@@ -1579,7 +1616,7 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
             sampler_name=DEFAULT_SAMPLER_NAME, scheduler=DEFAULT_SCHEDULER_NAME,
             seed=0, seed_policy="fixed", cfg=1.0,
             release_clip=release_clip, free_between_segments=free_between_segments,
-            audio_policy=audio_policy,
+            audio_policy=audio_policy, carry_source=carry_source,
             clip=clip, video_vae=video_vae, audio_vae=audio_vae,
             external_sigmas=None, external_noise=noise, external_sampler=None,
         ))
