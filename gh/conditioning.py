@@ -51,10 +51,12 @@ _ENCODE_CACHE_MAX = 16
 
 
 def _tensor_fingerprint(tensor) -> tuple:
+    # Sum ON the tensor's own device: .item() syncs a scalar, so there is no
+    # reason to copy multi-GB video-ref tensors across the bus just to hash
+    # them.  Low dtypes are upcast first so the sum does not saturate.
     t = tensor.detach()
-    if t.device.type != "cpu":
-        t = t.cpu()
-    t = t.float()
+    if t.dtype in (torch.float16, torch.bfloat16):
+        t = t.float()
     return (tuple(t.shape), str(t.dtype), float(t.sum().item()))
 
 
@@ -66,7 +68,7 @@ def _encode_fingerprint(packed_prompt, branch, ref_items, keyframe_images):
             (
                 item.get("type"),
                 _tensor_fingerprint(item["data"]) if "data" in item else None,
-                tuple(item.get("timestamps") or ()),
+                str(item.get("timestamps")),
             )
             for item in (ref_items or [])
         ),
