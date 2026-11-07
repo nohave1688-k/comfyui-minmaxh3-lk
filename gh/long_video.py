@@ -1018,29 +1018,37 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
     audio_mode = None
     first_positive = None
 
+    # Pre-build every shot's conditioning with ONE text-encoder load.  Shot
+    # continuation is carried in latent space (never as a conditioning image),
+    # so bundles cannot depend on each other's sampling results: encoding the
+    # whole range up front removes the per-shot CLIP unload/reload cycle that
+    # used to sit between consecutive shots.  ``release_clip`` now means:
+    # release once after the build phase, before the first shot samples.
+    bundles = {}
     for index in range(start, end + 1):
-        segment = plan["segments"][index]
         if preview.get("index") == index and preview.get("bundle") is not None:
-            bundle = preview["bundle"]
+            bundles[index] = preview["bundle"]
         elif index == start and prebuilt_bundle is not None:
-            bundle = prebuilt_bundle
+            bundles[index] = prebuilt_bundle
         else:
             if clip is None:
                 clip = _load_clip(plan)
             # No automatic previous-tail keyframe: continuation is carried in
             # latent space below, not as a first-frame conditioning image.
-            bundle = build_segment_bundle(
+            bundles[index] = build_segment_bundle(
                 plan, index, first_frame_override=None, clip=clip,
                 connected=(plan.get("connected_by_segment") or {}).get(index + 1),
             )
-        if first_positive is None:
-            # The conditioning output for downstream sampler chains: the first
-            # executed shot's positive bundle (prompt + reference encoding).
-            first_positive = bundle["positive"]
+    # The conditioning output for downstream sampler chains: the first
+    # executed shot's positive bundle (prompt + reference encoding).
+    first_positive = bundles[start]["positive"]
+    if release_clip and clip is not None:
+        _release_clip(plan, clip)
+        clip = None
 
-        if release_clip and clip is not None:
-            _release_clip(plan, clip)
-            clip = None
+    for index in range(start, end + 1):
+        segment = plan["segments"][index]
+        bundle = bundles[index]
 
         seg_seed = int(seed) if seed_policy == "fixed" else int(seed) + (index - start)
         seg_model = _apply_model_loras(model, segment.get("loras") or [], lora_cache)
@@ -1236,9 +1244,9 @@ class MiniMaxH3SegmentGuiderGH(io.ComfyNode):
                 "T8-style GUIDER for the first pass: owns the segmented loop "
                 "(per-shot conditioning + LoRA, latent continuation) and emits its own "
                 "SAMPLER / SIGMAS contract from the same steps/shifts recipe — one "
-                "source of truth for the first-pass sampling.  Wire its four outputs "
-                "into SamplerCustomAdvanced (sampler/sigmas from this node, noise from "
-                "any NOISE primitive, latent_image from the 空白AV模板)."
+                "source of truth for the first-pass sampling.  Wire its three outputs "
+                "(GUIDER/SAMPLER/SIGMAS) into SamplerCustomAdvanced, plus noise from "
+                "any NOISE primitive and latent_image from the 空白AV模板."
             ),
             inputs=[
                 io.Model.Input("model"),
@@ -1256,7 +1264,7 @@ class MiniMaxH3SegmentGuiderGH(io.ComfyNode):
                                tooltip="接缝处对续接上下文帧加噪。0 完全保留上一镜尾帧。"),
                 io.Boolean.Input(
                     "release_clip", default=True, advanced=True,
-                    tooltip="每镜采样前卸载文本编码器，下镜条件构建时再加载。显存紧张保持开启。",
+                    tooltip="全部镜头的条件化预构建完成后、首镜采样前卸载一次文本编码器（整轮只加载/卸载各一次）。显存紧张保持开启。",
                 ),
                 io.Boolean.Input("free_between_segments", default=True, advanced=True),
                 io.Vae.Input(
@@ -1435,6 +1443,27 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
     # independent draws that clash at the seams.
     g_video, g_audio = _make_noise(refined_latent.get("samples"), seed).unbind()
 
+    # Pre-build every shot's conditioning with ONE text-encoder load (same
+    # rationale as the first pass): the per-shot CLIP unload/reload cycle
+    # collapses to one load + one release before the first window samples.
+    # The template's zero latent is dead weight here (every window replaces
+    # its samples with the upscaled slice), so drop it right after each build
+    # to keep the hoisted retention at just the conditioning tensors.
+    bundles = {}
+    for index in range(start, end + 1):
+        if clip_obj is None:
+            clip_obj = _load_clip(plan)
+        bundle = build_segment_bundle(
+            plan, index, first_frame_override=None, clip=clip_obj,
+            connected=(plan.get("connected_by_segment") or {}).get(index + 1),
+        )
+        bundle["av_latent"].pop("samples", None)
+        bundles[index] = bundle
+    first_positive = bundles[start]["positive"]
+    if release_clip and clip_obj is not None:
+        _release_clip(plan, clip_obj)
+        clip_obj = None
+
     for index in range(start, end + 1):
         entry = entries[index - start]
         v0, vt = int(entry["video_offset"]), int(entry["video_tokens"])
@@ -1442,17 +1471,7 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
         seg_video = video[..., v0:v0 + vt, :, :]
         seg_audio = audio[..., a0:a0 + at]
 
-        if clip_obj is None:
-            clip_obj = _load_clip(plan)
-        bundle = build_segment_bundle(
-            plan, index, first_frame_override=None, clip=clip_obj,
-            connected=(plan.get("connected_by_segment") or {}).get(index + 1),
-        )
-        if first_positive is None:
-            first_positive = bundle["positive"]
-        if release_clip and clip_obj is not None:
-            _release_clip(plan, clip_obj)
-            clip_obj = None
+        bundle = bundles[index]
 
         # Swap the template's samples for this shot's slice of the upscaled
         # film; the template's metadata (audio mode, keyframe bookkeeping)
@@ -1603,16 +1622,22 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
             # what the schedule says (noise/mask/pack corruption), a tiny delta
             # with visible flicker points downstream of the sampler.
             with torch.no_grad():
-                _in = seg_video.detach().float()
-                _out = out_video.detach().float()
-                _diff = (_out - _in).abs()
-                logging.info(
-                    "[LKH3] 精修镜头%d: 步数=%d 入口σ=%.4f | 输出-输入 |Δ|max=%.4f mean=%.4f | 输入std=%.4f 输出std=%.4f | 窗口=%s 裁剪=%d",
-                    index + 1, len(external_sigmas) - 1, float(external_sigmas[0]),
-                    float(_diff.max()), float(_diff.mean()),
-                    float(_in.std()), float(_out.std()),
-                    tuple(window_video.shape), carry_t,
-                )
+                _in = seg_video.detach().float().cpu()
+                _out = out_video.detach().float().cpu()
+                if _out.shape != _in.shape:
+                    logging.info(
+                        "[LKH3] 精修镜头%d: 形状不一致 输入=%s 输出=%s（跳过Δ统计）",
+                        index + 1, tuple(_in.shape), tuple(_out.shape),
+                    )
+                else:
+                    _diff = (_out - _in).abs()
+                    logging.info(
+                        "[LKH3] 精修镜头%d: 步数=%d 入口σ=%.4f | 输出-输入 |Δ|max=%.4f mean=%.4f | 输入std=%.4f 输出std=%.4f | 窗口=%s 裁剪=%d",
+                        index + 1, len(external_sigmas) - 1, float(external_sigmas[0]),
+                        float(_diff.max()), float(_diff.mean()),
+                        float(_in.std()), float(_out.std()),
+                        tuple(window_video.shape), carry_t,
+                    )
         if audio_policy == "keep":
             # Composite the first pass's audio back verbatim AFTER the trim:
             # the sampled window carries the locked previous-tail audio only
@@ -1699,7 +1724,7 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
                 ),
                 io.Boolean.Input(
                     "release_clip", default=True, advanced=True,
-                    tooltip="每镜条件构建后卸载文本编码器，下镜再加载。显存紧张保持开启。",
+                    tooltip="全部镜头的条件化预构建完成后、首窗采样前卸载一次文本编码器（整轮只加载/卸载各一次）。显存紧张保持开启。",
                 ),
                 io.Boolean.Input("free_between_segments", default=True, advanced=True),
                 io.Combo.Input(
