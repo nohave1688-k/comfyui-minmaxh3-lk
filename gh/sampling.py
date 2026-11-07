@@ -566,10 +566,15 @@ def setup_dual_clock_sampling_gh(
         sampler = comfy.samplers.KSAMPLER(sampler_function)
         # Metadata consumed by the Goohai second-pass tiled sampler.  It lets
         # that node run the same dual-clock update while synchronizing tiles.
+        # ``_goohai_audio_values`` records the audio-element count this sampler
+        # was built against: the dual-clock euler splits the packed AV tensor
+        # at packed - audio_values, so a sampler may only sample a latent whose
+        # audio length matches (segmented loops must rebuild it per segment).
         sampler._goohai_dual_clock = True
         sampler._goohai_shift_video = float(shift_video)
         sampler._goohai_shift_audio = float(shift_audio)
         sampler._goohai_audio_velocity_is_raw = bool(audio_velocity_is_raw)
+        sampler._goohai_audio_values = int(audio_values)
 
     sigmas = _scheduler_sigmas(model_sampling, scheduler, steps, shift_video)
     return patched_model, sampler, sigmas

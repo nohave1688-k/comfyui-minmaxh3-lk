@@ -881,6 +881,35 @@ def _assemble_whole_av_latent(collected, audio_mode, latent_continue, start, end
     return out
 
 
+def _external_sampler_for(av_latent, external_sampler):
+    """Validate an externally handed-in dual-clock KSAMPLER against THIS latent.
+
+    The dual-clock euler splits the packed AV tensor at ``packed - audio_values``
+    where ``audio_values`` was captured from the latent the sampler was BUILT
+    on.  Contract samplers are built on the whole-film template, so their split
+    is wrong for every individual segment: each segment's tail (plus its real
+    audio) silently took the AUDIO clock instead of the video clock, and since
+    that tail is exactly what the next shot carries, the film degraded hop over
+    hop.  The original pack never hit this because it rebuilds the sampler per
+    segment.  Reject mismatched samplers and fall back to the per-segment
+    builtin.
+    """
+    if external_sampler is None:
+        return None
+    want = getattr(external_sampler, "_goohai_audio_values", None)
+    if want is None:
+        return external_sampler
+    _video, audio = nested_av_parts(av_latent)
+    have = int(math.prod(audio.shape[1:]))
+    if int(want) != have:
+        logging.info(
+            "[LKH3] 外接双钟采样器的音频切分(%d)与本镜(%d)不符 —— 本镜改用按本镜音频长度构建的内置双钟采样器",
+            int(want), have,
+        )
+        return None
+    return external_sampler
+
+
 def _sample_bundle(model, bundle, *, steps, shift_video, shift_audio,
                    sampler_name, scheduler, seed, cfg, progress=None,
                    external_noise=None, external_sigmas=None, external_sampler=None):
@@ -890,6 +919,7 @@ def _sample_bundle(model, bundle, *, steps, shift_video, shift_audio,
     # so the sampler advances the audio clock correctly. Our own dual-clock
     # KSAMPLER (marker attr) pairs with the dual-clock patch instead — the
     # segmented guider path hands it in as an external sampler.
+    external_sampler = _external_sampler_for(av_latent, external_sampler)
     effective_sampler_name = sampler_name
     if external_sampler is not None and not getattr(external_sampler, "_goohai_dual_clock", False):
         effective_sampler_name = "euler"
@@ -1134,14 +1164,18 @@ def build_empty_plan_latent(plan, start, end):
 class _SegmentedAVGuider:
     """GUIDER object for SamplerCustomAdvanced: owns the segmented long-video
     loop (per-shot conditioning + LoRA, latent continuation, seam noise) while
-    the sampler object, the schedule and the seed come from the surrounding
-    standard sampling primitives — the T8-style decomposition of the first
-    pass.
+    the schedule and the seed come from the surrounding standard sampling
+    primitives — the T8-style decomposition of the first pass.
 
     ``noise``/``latent_image`` handed in by SamplerCustomAdvanced are the
     whole-template artifacts of that composition; the loop builds its own
-    per-shot templates and noise. The primitives that matter are the sampler
-    object, the sigmas and the seed.
+    per-shot templates and noise. The primitives that matter are the sigmas
+    and the seed.  The SAMPLER deliberately does NOT flow in: the dual-clock
+    euler bakes the audio-element count of the latent it was built on, so a
+    whole-film contract sampler mis-splits every per-segment packed tensor —
+    each segment rebuilds its own sampler instead (exactly what the original
+    pack's per-segment loop does).  The contract sampler this node emits stays
+    a wiring requirement of SamplerCustomAdvanced, nothing more.
     """
 
     def __init__(self, model_patcher, plan, *, steps, shift_video, shift_audio,
@@ -1175,7 +1209,11 @@ class _SegmentedAVGuider:
             context_noise=self._context_noise,
             video_vae=self._video_vae, audio_vae=self._audio_vae,
             prebuilt=self._prebuilt,
-            external_noise=None, external_sigmas=sigmas, external_sampler=sampler,
+            # The SCA sampler is the whole-film contract object; per-segment
+            # dual-clock samplers must be rebuilt against each segment's own
+            # audio length (see _external_sampler_for), so only the schedule
+            # flows in from the primitives.
+            external_noise=None, external_sigmas=sigmas, external_sampler=None,
         )
         return av_latent["samples"]
 
