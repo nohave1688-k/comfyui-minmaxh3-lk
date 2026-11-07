@@ -226,6 +226,9 @@
       "context_noise": {
         "name": "Carry Head Context Noise"
       },
+      "refine_entry_sigma": {
+        "name": "Refine Entry Sigma"
+      },
       "clip": {
         "name": "CLIP"
       },

@@ -1334,7 +1334,7 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
                         audio_policy="keep", clip=None, video_vae=None,
                         audio_vae=None, external_sigmas=None, external_noise=None,
                         external_sampler=None, carry_source="anchor",
-                        context_noise=0.15):
+                        context_noise=0.15, refine_entry_sigma=0.5):
     """Segmented HD second pass: refine an upscaled whole-film AV latent one
     shot at a time.
 
@@ -1390,16 +1390,29 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
             seed = obj_seed
 
     if external_sigmas is None:
-        # Self-computed refine schedule: the full base schedule split at the
-        # coarse cutoff (9/4 -> the remaining 5 sigmas down to 0), matching
-        # the T8 ParityPlan without the external contract/plan nodes.
         coarse = max(1, min(int(coarse_steps), int(base_steps) - 1))
-        _patched, _sampler, full_schedule = setup_dual_clock_sampling_gh(
-            model, refined_latent, int(base_steps), float(shift_video),
-            float(shift_audio), sampler_name or DEFAULT_SAMPLER_NAME,
-            scheduler or DEFAULT_SCHEDULER_NAME,
-        )
-        external_sigmas = full_schedule[int(coarse):]
+        if float(refine_entry_sigma) < 0.999:
+            # True-polish schedule: re-noise the upscaled span to the entry
+            # sigma and come down linearly.  The full shift-12 schedule's tail
+            # starts at ~0.94 (9/4) or ~0.6 (even at coarse=base-1) - at that
+            # depth "refine" is a near-full regeneration that re-hallucinates
+            # every shot's texture (grid/color churn), while the whole point
+            # of a second pass on an already-continuous film is to polish the
+            # latent it is given.  A linear schedule from the entry sigma
+            # keeps the upscaled content dominant; base/coarse then only
+            # decide the step count (base - coarse).
+            refine_steps = max(1, int(base_steps) - coarse)
+            base = torch.linspace(1.0, 0.0, refine_steps + 1, dtype=torch.float32)
+            external_sigmas = float(refine_entry_sigma) * base
+        else:
+            # T8-parity schedule: the full base schedule split at the coarse
+            # cutoff (9/4 -> the remaining 5 sigmas down to 0).
+            _patched, _sampler, full_schedule = setup_dual_clock_sampling_gh(
+                model, refined_latent, int(base_steps), float(shift_video),
+                float(shift_audio), sampler_name or DEFAULT_SAMPLER_NAME,
+                scheduler or DEFAULT_SCHEDULER_NAME,
+            )
+            external_sigmas = full_schedule[int(coarse):]
 
     lora_cache = _lora_cache()
     clip_obj = plan.get("clip")
@@ -1657,6 +1670,11 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
                     optional=True,
                     tooltip="续接头的重加噪强度（等价一采的 Context noise）。精修从中段 σ 起跑，头部若完全锁死（0）属于分布外输入，镜 2 起会闪烁；0.1-0.2 让采样器轻度重净头部。头部会被裁掉、不进成片，调它只影响模型所见。",
                 ),
+                io.Float.Input(
+                    "refine_entry_sigma", default=0.5, min=0.05, max=1.0, step=0.05,
+                    optional=True,
+                    tooltip="精修重加噪上限（入口 σ）。shift-12 完整调度的尾巴从 ~0.94 起跑，等于把放大潜空间重新生成一遍（纹理 churn = 网格斑/颜色漂移）；<1 时改用线性调度从该 σ 降到 0，放大潜空间自身的干净细节成为主导。0.5=润色；0.3=极轻；1.0=T8 等价的重生成。",
+                ),
                 io.Custom("CLIP").Input(
                     "clip", optional=True, display_name="CLIP",
                     tooltip="CLIP（从 MiniMaxH3 长视频编排 连线）。未连接时按模型设置名字加载。",
@@ -1687,6 +1705,7 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
                 base_steps, coarse_steps, audio_policy,
                 release_clip=True, free_between_segments=True,
                 carry_source="anchor", context_noise=0.15,
+                refine_entry_sigma=0.5,
                 clip=None, video_vae=None, audio_vae=None,
                 noise=None):
         return io.NodeOutput(*run_refine_segments(
@@ -1697,7 +1716,7 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
             seed=0, seed_policy="fixed", cfg=1.0,
             release_clip=release_clip, free_between_segments=free_between_segments,
             audio_policy=audio_policy, carry_source=carry_source,
-            context_noise=context_noise,
+            context_noise=context_noise, refine_entry_sigma=refine_entry_sigma,
             clip=clip, video_vae=video_vae, audio_vae=audio_vae,
             external_sigmas=None, external_noise=noise, external_sampler=None,
         ))

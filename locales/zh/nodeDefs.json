@@ -230,6 +230,9 @@
       "context_noise": {
         "name": "续接头重加噪"
       },
+      "refine_entry_sigma": {
+        "name": "精修重加噪上限"
+      },
       "clip": {
         "name": "CLIP"
       },
