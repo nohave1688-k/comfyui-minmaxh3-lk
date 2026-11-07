@@ -515,9 +515,23 @@ class MiniMaxH3ComposerGH(io.ComfyNode):
                     "av_template", display_name="空白AV模板",
                     tooltip="整段空白 AV 模板（含 lk_layout）— 接 双钟采样/T8契约 的 av_latent 和 SamplerCustomAdvanced 的 latent_image。",
                 ),
+                io.Custom("CLIP").Output(
+                    "clip", display_name="CLIP",
+                    tooltip="裸 CLIP 输出 — 给本包之外的节点（如 T8/lanxi 的采样、解码节点）单独拉线用。",
+                ),
+                io.Vae.Output(
+                    "video_vae", display_name="视频 VAE",
+                    tooltip="裸视频 VAE 输出 — 给本包之外的节点单独拉线用。",
+                ),
+                io.Vae.Output(
+                    "audio_vae", display_name="音频 VAE",
+                    tooltip="裸音频 VAE 输出 — 给本包之外的节点单独拉线用。",
+                ),
+                # Appended LAST so pre-bundle canvases keep every bare wire on
+                # its original slot - the bundle is purely additive.
                 io.Custom(RUNTIME_TYPE).Output(
                     "runtime", display_name="解码设置",
-                    tooltip="CLIP + 视频 VAE + 音频 VAE 捆绑 — 一根线接 分段引导/二跑分段精修/AV 解码 的 解码设置 输入。",
+                    tooltip="CLIP + 视频 VAE + 音频 VAE 捆绑 — 一根线接本包 分段引导/二跑分段精修/AV 解码 的 解码设置 输入。",
                 ),
             ],
         )
@@ -549,7 +563,10 @@ class MiniMaxH3ComposerGH(io.ComfyNode):
         end = int(plan["range"]["end"]) - 1
         template = build_empty_plan_latent(plan, start, end)
         runtime = {"clip": clip, "video_vae": video_vae, "audio_vae": audio_vae}
-        return io.NodeOutput(plan, template, runtime)
+        # The bundle feeds THIS pack's nodes (one wire per consumer); the bare
+        # clip/VAE outputs stay so third-party nodes (T8/lanxi samplers,
+        # decoders, generic VAE consumers) keep working unchanged.
+        return io.NodeOutput(plan, template, runtime, clip, video_vae, audio_vae)
 
 class MiniMaxH3ShotGH(io.ComfyNode):
     """One shot of the long video: duration, prompt, reference media and

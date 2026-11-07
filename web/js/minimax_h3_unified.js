@@ -1995,11 +1995,10 @@ app.registerExtension({
         // (conditioning removed) - truncate ghosts and relocate same-type
         // wires, mirroring the guider's fix.
         const RUNTIME_OUTPUTS = {
-            LKH3Composer: [
-                { name: "segments", type: "LANXI_H3_SEGMENTS" },
-                { name: "空白AV模板", type: "LATENT" },
-                { name: "解码设置", type: "LK_H3_RUNTIME" },
-            ],
+            // LKH3Composer deliberately NOT listed: its bundle output is
+            // appended after the original five slots, so pre-bundle canvases
+            // keep every bare wire on its original slot and need no healing.
+            LKH3AVDecode: [
             LKH3AVDecode: [
                 { name: "frames", type: "IMAGE" },
                 { name: "audio", type: "AUDIO" },

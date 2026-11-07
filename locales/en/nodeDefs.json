@@ -321,14 +321,28 @@
     },
     "outputs": {
       "0": {
-        "name": "segments"
+        "name": "segments",
+        "tooltip": "Long-video segment plan; connect to the samplers / 分段引导 / 二跑分段精修."
       },
       "1": {
-        "name": "Empty AV Template"
+        "name": "空白AV模板",
+        "tooltip": "整段空白 AV 模板（含 lk_layout）— 接 双钟采样/T8契约 的 av_latent 和 SamplerCustomAdvanced 的 latent_image。"
       },
       "2": {
+        "name": "CLIP",
+        "tooltip": "裸 CLIP 输出 — 给本包之外的节点（如 T8/lanxi 的采样、解码节点）单独拉线用。"
+      },
+      "3": {
+        "name": "视频 VAE",
+        "tooltip": "裸视频 VAE 输出 — 给本包之外的节点单独拉线用。"
+      },
+      "4": {
+        "name": "音频 VAE",
+        "tooltip": "裸音频 VAE 输出 — 给本包之外的节点单独拉线用。"
+      },
+      "5": {
         "name": "解码设置",
-        "tooltip": "Bundled CLIP + video VAE + audio VAE - one wire into the guider/refine/decode 解码设置 input."
+        "tooltip": "CLIP + 视频 VAE + 音频 VAE 捆绑 — 一根线接本包 分段引导/二跑分段精修/AV 解码 的 解码设置 输入。"
       }
     }
   }
