@@ -1949,6 +1949,29 @@ app.registerExtension({
                         node.addOutput(want.name, want.type);
                     }
                 }
+                // Ghost sockets: canvases saved across output-list changes can
+                // carry MORE serialized outputs than the definition (the removed
+                // conditioning output lives on as a 4th socket, and wires may
+                // still hang there — the server would index past the returned
+                // tuple). Relocate those wires to the expected slot of the same
+                // type, then truncate to the definition.
+                if (node.outputs.length > EXPECTED_OUTPUTS.length) {
+                    for (let i = EXPECTED_OUTPUTS.length; i < node.outputs.length; i++) {
+                        for (const lid of (node.outputs[i].links || []).slice()) {
+                            const all = node.graph?._links;
+                            const lk = typeof all?.get === "function" ? all.get(lid) : all?.[lid];
+                            if (!lk || lk.origin_id !== node.id) continue;
+                            const target = EXPECTED_OUTPUTS.findIndex((e) => e.type === lk.type);
+                            if (target < 0) continue;
+                            const dst = node.outputs[target];
+                            dst.links = dst.links || [];
+                            if (!dst.links.includes(lid)) dst.links.push(lid);
+                            lk.origin_slot = target;
+                        }
+                    }
+                    node.outputs.length = EXPECTED_OUTPUTS.length;
+                    node.setDirtyCanvas?.(true, true);
+                }
             };
             const previousGuiderCreated = nodeType.prototype.onNodeCreated;
             nodeType.prototype.onNodeCreated = function() {
