@@ -1641,6 +1641,7 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
                 ),
                 io.Float.Input(
                     "context_noise", default=0.15, min=0.0, max=1.0, step=0.05,
+                    optional=True,
                     tooltip="续接头的重加噪强度（等价一采的 Context noise）。精修从中段 σ 起跑，头部若完全锁死（0）属于分布外输入，镜 2 起会闪烁；0.1-0.2 让采样器轻度重净头部。头部会被裁掉、不进成片，调它只影响模型所见。",
                 ),
                 io.Custom("CLIP").Input(
