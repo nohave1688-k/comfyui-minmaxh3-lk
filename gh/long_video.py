@@ -1390,6 +1390,40 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
             "av_latent 必须来自同一分段计划的一采输出放大。"
         )
 
+    # Layout sanity: the learned upscaler re-emits the layout with per-shot
+    # token counts re-derived from each shot's FULL duration, dropping pass-1's
+    # carry trims (CARRY_TOKENS / CARRY_AUDIO_STEPS per carried shot).  Slicing
+    # by those sizes misaligns every shot after the first - the second shot's
+    # window swallows the next shot's head tokens, the third loses its own -
+    # which shows up as duplicated/dropped frames at every seam (the
+    # "flicker") while sums drift off the actual tensor.  Detect the drift and
+    # rebuild the true spans; an honest layout passes through untouched.
+    if plan.get("latent_continue", True) and len(entries) > 1:
+        span_sum = sum(int(e.get("video_tokens") or 0) for e in entries)
+        audio_sum = sum(int(e.get("audio_steps") or 0) for e in entries)
+        if span_sum != int(video.shape[2]) or audio_sum != int(audio.shape[-1]):
+            rebuilt = []
+            v_cursor = a_cursor = 0
+            for i, e in enumerate(entries):
+                v_tokens = int(e.get("video_tokens") or 0) - (CARRY_TOKENS if i > 0 else 0)
+                a_steps = int(e.get("audio_steps") or 0) - (CARRY_AUDIO_STEPS if i > 0 else 0)
+                v_tokens = max(1, v_tokens)
+                a_steps = max(1, a_steps)
+                rebuilt.append({
+                    **e,
+                    "video_offset": v_cursor, "video_tokens": v_tokens,
+                    "audio_offset": a_cursor, "audio_steps": a_steps,
+                })
+                v_cursor += v_tokens
+                a_cursor += a_steps
+            logging.warning(
+                "[LKH3] 布局跨度与实际影片不符(视频 %d vs %d / 音频 %d vs %d)——"
+                "放大器按时长重推了每镜跨度，已按一采续接裁剪重推: %s",
+                span_sum, int(video.shape[2]), audio_sum, int(audio.shape[-1]),
+                [e["video_tokens"] for e in rebuilt],
+            )
+            entries = rebuilt
+
     # Per-shot conditioning must be built at the UPSCALED canvas so the
     # reference images re-encode in HD (the HIGH-conditioning equivalent).
     height = int(video.shape[3]) * 16
