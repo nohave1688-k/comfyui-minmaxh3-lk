@@ -231,7 +231,7 @@
         "name": "续接头重加噪"
       },
       "refine_entry_sigma": {
-        "name": "精修重加噪上限"
+        "name": "精修去噪强度 (denoise)"
       },
       "clip": {
         "name": "CLIP"

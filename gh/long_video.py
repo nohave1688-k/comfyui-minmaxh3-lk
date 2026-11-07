@@ -31,6 +31,7 @@ import torch
 from comfy_api.latest import io
 
 import comfy.nested_tensor
+import comfy.samplers
 import comfy.utils
 
 from .conditioning import build_conditioning
@@ -40,6 +41,7 @@ from .sampling import (
     DEFAULT_SCHEDULER_NAME,
     SAMPLER_OPTIONS,
     SCHEDULER_OPTIONS,
+    _make_sampling,
     _pixel_frames_from_latent_t,
     _scheduler_sigmas,
     setup_dual_clock_sampling_gh,
@@ -912,7 +914,8 @@ def _external_sampler_for(av_latent, external_sampler):
 
 def _sample_bundle(model, bundle, *, steps, shift_video, shift_audio,
                    sampler_name, scheduler, seed, cfg, progress=None,
-                   external_noise=None, external_sigmas=None, external_sampler=None):
+                   external_noise=None, external_sigmas=None, external_sampler=None,
+                   external_noise_tensor=None):
     av_latent = bundle["av_latent"]
     # An external plain standard sampler requires the native FLOW_AV model
     # -sampling patch (any sampler name other than dual_clock_euler selects it)
@@ -934,7 +937,11 @@ def _sample_bundle(model, bundle, *, steps, shift_video, shift_audio,
         sigmas = default_sigmas
     guider = _make_guider(patched_model, bundle["positive"], cfg)
     samples = av_latent["samples"]
-    if external_noise is not None:
+    if external_noise_tensor is not None:
+        # Pre-built noise (the refine's global field, sliced per window) —
+        # positioned so neighboring chunks share one coherent noise draw.
+        noise = external_noise_tensor
+    elif external_noise is not None:
         try:
             noise = external_noise.generate_noise(samples, int(seed) & 0x7FFFFFFFFFFFFFFF)
         except TypeError:
@@ -1334,7 +1341,7 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
                         audio_policy="keep", clip=None, video_vae=None,
                         audio_vae=None, external_sigmas=None, external_noise=None,
                         external_sampler=None, carry_source="anchor",
-                        context_noise=0.15, refine_entry_sigma=0.5):
+                        context_noise=0.15, refine_entry_sigma=0.30):
     """Segmented HD second pass: refine an upscaled whole-film AV latent one
     shot at a time.
 
@@ -1390,29 +1397,22 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
             seed = obj_seed
 
     if external_sigmas is None:
-        coarse = max(1, min(int(coarse_steps), int(base_steps) - 1))
-        if float(refine_entry_sigma) < 0.999:
-            # True-polish schedule: re-noise the upscaled span to the entry
-            # sigma and come down linearly.  The full shift-12 schedule's tail
-            # starts at ~0.94 (9/4) or ~0.6 (even at coarse=base-1) - at that
-            # depth "refine" is a near-full regeneration that re-hallucinates
-            # every shot's texture (grid/color churn), while the whole point
-            # of a second pass on an already-continuous film is to polish the
-            # latent it is given.  A linear schedule from the entry sigma
-            # keeps the upscaled content dominant; base/coarse then only
-            # decide the step count (base - coarse).
-            refine_steps = max(1, int(base_steps) - coarse)
-            base = torch.linspace(1.0, 0.0, refine_steps + 1, dtype=torch.float32)
-            external_sigmas = float(refine_entry_sigma) * base
-        else:
-            # T8-parity schedule: the full base schedule split at the coarse
-            # cutoff (9/4 -> the remaining 5 sigmas down to 0).
-            _patched, _sampler, full_schedule = setup_dual_clock_sampling_gh(
-                model, refined_latent, int(base_steps), float(shift_video),
-                float(shift_audio), sampler_name or DEFAULT_SAMPLER_NAME,
-                scheduler or DEFAULT_SCHEDULER_NAME,
-            )
-            external_sigmas = full_schedule[int(coarse):]
+        # T8's published refine recipe (chunked_two_pass low-sigma plan v3):
+        # "BasicScheduler(simple, N steps, denoise d)" - the TAIL of a longer
+        # simple schedule, so the second pass is a gentle img2img polish
+        # (denoise 0.30 in the released workflow, 0.40 max upstream) instead
+        # of the near-full regeneration a truncated shift-12 schedule gives
+        # (9/4 enters at sigma 0.938!).  total = steps/denoise mirrors comfy's
+        # own KSampler denoise handling; base/coarse only set the step count.
+        refine_steps = max(1, int(base_steps) - max(1, min(int(coarse_steps), int(base_steps) - 1)))
+        entry = max(0.02, min(1.0, float(refine_entry_sigma)))
+        total = max(refine_steps + 1, int(round(refine_steps / entry)))
+        model_sampling = _make_sampling(
+            model, model.get_model_object("model_sampling"),
+            float(shift_video), float(shift_audio), False,
+        )
+        full = comfy.samplers.calculate_sigmas(model_sampling, "simple", total).float().cpu()
+        external_sigmas = full[-(refine_steps + 1):]
 
     lora_cache = _lora_cache()
     clip_obj = plan.get("clip")
@@ -1423,6 +1423,11 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
     audio_mode = None
     first_positive = None
     previous_samples = None
+    # ONE global noise field over the whole film (T8 global noise policy):
+    # every window's noise is a positional slice of this same field, so
+    # neighboring chunks' reconstructions stay correlated instead of being
+    # independent draws that clash at the seams.
+    g_video, g_audio = _make_noise(refined_latent.get("samples"), seed).unbind()
 
     for index in range(start, end + 1):
         entry = entries[index - start]
@@ -1556,13 +1561,26 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
         segment = plan["segments"][index]
         seg_seed = int(seed) if seed_policy == "fixed" else int(seed) + (index - start)
         seg_model = _apply_model_loras(model, segment.get("loras") or [], lora_cache)
+        # The window's noise = this film region's slice of the global field
+        # (head range included when a carry head extends the window).
+        noise_video = g_video[..., v0:v0 + vt, :, :]
+        noise_audio = g_audio[..., a0:a0 + at]
+        if carry_t > 0:
+            noise_video = torch.cat(
+                [g_video[..., v0 - carry_t:v0, :, :], noise_video], dim=2
+            )
+            if carry_a > 0:
+                noise_audio = torch.cat(
+                    [g_audio[..., a0 - carry_a:a0], noise_audio], dim=-1
+                )
+        window_noise = comfy.nested_tensor.NestedTensor((noise_video, noise_audio))
         samples = _sample_bundle(
             seg_model, bundle,
             steps=int(base_steps), shift_video=float(shift_video), shift_audio=float(shift_audio),
             sampler_name=sampler_name, scheduler=scheduler, seed=seg_seed, cfg=float(cfg),
             progress=progress,
             external_noise=external_noise, external_sigmas=external_sigmas,
-            external_sampler=external_sampler,
+            external_sampler=external_sampler, external_noise_tensor=window_noise,
         )
         out_video, out_audio = nested_av_parts(samples)
         if audio_mode is None:
@@ -1671,9 +1689,9 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
                     tooltip="续接头的重加噪强度（等价一采的 Context noise）。精修从中段 σ 起跑，头部若完全锁死（0）属于分布外输入，镜 2 起会闪烁；0.1-0.2 让采样器轻度重净头部。头部会被裁掉、不进成片，调它只影响模型所见。",
                 ),
                 io.Float.Input(
-                    "refine_entry_sigma", default=0.5, min=0.05, max=1.0, step=0.05,
+                    "refine_entry_sigma", default=0.30, min=0.02, max=1.0, step=0.05,
                     optional=True,
-                    tooltip="精修重加噪上限（入口 σ）。shift-12 完整调度的尾巴从 ~0.94 起跑，等于把放大潜空间重新生成一遍（纹理 churn = 网格斑/颜色漂移）；<1 时改用线性调度从该 σ 降到 0，放大潜空间自身的干净细节成为主导。0.5=润色；0.3=极轻；1.0=T8 等价的重生成。",
+                    tooltip="精修去噪强度（denoise）。T8 发布配方：simple 调度、3 步、denoise 0.30（上限 0.40）——二采是轻度 img2img 润色而不是重生成，0.94 入口的重生成正是网格斑/颜色漂移的来源。噪声来自全片共享的全局噪声场按位置切片，邻镜重建相互关联。",
                 ),
                 io.Custom("CLIP").Input(
                     "clip", optional=True, display_name="CLIP",
@@ -1705,7 +1723,7 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
                 base_steps, coarse_steps, audio_policy,
                 release_clip=True, free_between_segments=True,
                 carry_source="anchor", context_noise=0.15,
-                refine_entry_sigma=0.5,
+                refine_entry_sigma=0.30,
                 clip=None, video_vae=None, audio_vae=None,
                 noise=None):
         return io.NodeOutput(*run_refine_segments(
