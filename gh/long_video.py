@@ -1364,6 +1364,12 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
         raise ValueError("Connect the storyboard node's 'segments' output to the refine node.")
     if not getattr(refined_latent.get("samples", None), "is_nested", False):
         raise ValueError("二跑精修需要放大后的嵌套 AV 潜空间（来自 AV潜空间放大 / 学习型放大器）。")
+    logging.info(
+        "[LKH3] 二跑精修启动: 镜头%d-%d base=%d coarse=%d denoise=%.2f 续接=%s | 潜空间形状=%s",
+        int(plan["range"]["start"]), int(plan["range"]["end"]),
+        int(base_steps), int(coarse_steps), float(refine_entry_sigma), carry_source,
+        tuple(refined_latent["samples"].shape) if hasattr(refined_latent["samples"], "shape") else "nested",
+    )
     video, audio = nested_av_parts(refined_latent)
     layout = refined_latent.get("lk_layout") or {}
     entries = layout.get("segments") or []
