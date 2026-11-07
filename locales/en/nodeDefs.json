@@ -110,20 +110,12 @@
     },
     "outputs": {
       "0": {
-        "name": "Frames",
-        "tooltip": "All decoded frames (one IMAGE per frame)."
+        "name": "图像",
+        "tooltip": "Decoded video frames."
       },
       "1": {
-        "name": "Audio",
-        "tooltip": "The decoded full audio."
-      },
-      "2": {
-        "name": "Video Latent",
-        "tooltip": "Video half of the latent (with layout metadata)."
-      },
-      "3": {
-        "name": "Audio Latent",
-        "tooltip": "Audio half of the latent."
+        "name": "音频",
+        "tooltip": "Decoded audio."
       }
     }
   },
@@ -179,17 +171,15 @@
     "outputs": {
       "0": {
         "name": "GUIDER",
-        "tooltip": "分段引导对象 — 接 SamplerCustomAdvanced 的 guider。采样器/调度表/种子/cfg 全部由外接原语链决定。"
+        "tooltip": "Segmented guider object - wire into SamplerCustomAdvanced's guider."
       },
       "1": {
-        "name": "conditioning",
-        "tooltip": "首镜的正向条件（预构建，循环内复用）— 供下游二采 BasicGuider 使用。"
+        "name": "sampler",
+        "tooltip": "First-pass SAMPLER matching this node's steps/shifts - wire into SamplerCustomAdvanced's sampler."
       },
       "2": {
-        "name": "sampler"
-      },
-      "3": {
-        "name": "sigmas"
+        "name": "sigmas",
+        "tooltip": "First-pass schedule matching this node's steps/shifts/scheduler - wire into SamplerCustomAdvanced's sigmas."
       }
     }
   },
@@ -253,10 +243,8 @@
     },
     "outputs": {
       "0": {
-        "name": "AV Latent"
-      },
-      "1": {
-        "name": "conditioning"
+        "name": "AV 潜空间",
+        "tooltip": "The whole upscaled AV latent (with lk_layout) - wire into the AV decode node."
       }
     }
   },
