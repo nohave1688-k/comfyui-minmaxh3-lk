@@ -1431,7 +1431,10 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
             if tokens > 0:
                 pv0, pvt = int(prev_entry["video_offset"]), int(prev_entry["video_tokens"])
                 pa0, pat = int(prev_entry["audio_offset"]), int(prev_entry["audio_steps"])
-                head_video = video[..., pv0 + pvt - tokens:pv0 + pvt]
+                # video is [B, C, T, H, W] - time is dim 2, so the tail slice
+                # needs the explicit trailing dims (unlike the audio part,
+                # whose [B, C, F, T] layout keeps time in the LAST dim).
+                head_video = video[..., pv0 + pvt - tokens:pv0 + pvt, :, :]
                 head_audio = (
                     audio[..., pa0 + pat - audio_steps:pa0 + pat]
                     if audio_steps > 0 else None
