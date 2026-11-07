@@ -2028,5 +2028,24 @@ app.registerExtension({
             this.setDirtyCanvas?.(true, true);
             return result;
         };
+        // Serialized canvases keep node titles saved under the old lanxi
+        // branding; onConfigure restores that stored title AFTER onNodeCreated
+        // applied the LK one, so re-apply here - but only when the stored
+        // title still carries the stale branding, leaving genuine user
+        // renames untouched.
+        const previousConfigure = nodeType.prototype.onConfigure;
+        nodeType.prototype.onConfigure = function(...args) {
+            const result = previousConfigure?.apply(this, args);
+            const retitle = () => {
+                if (/lanxi/i.test(this.title || "")) {
+                    this.title = LK_TITLES[nodeData.name];
+                    this.setDirtyCanvas?.(true, true);
+                }
+            };
+            retitle();
+            requestAnimationFrame(retitle);
+            setTimeout(retitle, 100);
+            return result;
+        };
     },
 });
