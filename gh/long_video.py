@@ -1333,7 +1333,8 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
                         seed_policy, cfg, release_clip, free_between_segments,
                         audio_policy="keep", clip=None, video_vae=None,
                         audio_vae=None, external_sigmas=None, external_noise=None,
-                        external_sampler=None, carry_source="anchor"):
+                        external_sampler=None, carry_source="anchor",
+                        context_noise=0.15):
     """Segmented HD second pass: refine an upscaled whole-film AV latent one
     shot at a time.
 
@@ -1502,7 +1503,17 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
                 (1, 1, window_video.shape[2], window_video.shape[3], window_video.shape[4]),
                 device=window_video.device, dtype=torch.float32,
             )
-            video_mask[..., :tokens, :, :] = 0.0
+            # The head must NOT be hard-locked at 0: the refine pass starts at
+            # sigma[coarse] (mid-schedule), and a zero-noise head amid a
+            # half-noisy span is an out-of-distribution input for the temporal
+            # attention - the span's early frames get pulled toward the head's
+            # clean statistics and the trajectory oscillates (visible flicker
+            # in every shot after the first, in BOTH carry modes, while shot 1
+            # - which has no head - stays clean; pass 1 shows the same knob
+            # fixes it).  context_noise keeps the head lightly noised so it
+            # stays in-distribution; the head is trimmed from the output, so
+            # this only affects what the model sees.
+            video_mask[..., :tokens, :, :] = max(0.0, min(1.0, float(context_noise)))
             audio_mask = torch.ones(
                 (1, 1, window_audio.shape[2], window_audio.shape[3]),
                 device=window_audio.device, dtype=torch.float32,
@@ -1628,6 +1639,10 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
                     "carry_source", options=["anchor", "chained"], default="anchor",
                     tooltip="每镜续接上下文的来源。anchor = 取自放大的首采潜空间（固定质量锚点，逐镜不复利，8 镜以上全片质量均匀）；chained = 取上一镜的精修输出（接缝与精修结果严格连续，但逐镜链式累积）。两种模式的续接内容都是上一镜末帧——分镜各自参考不同图片不受影响，参考从不进入续接。",
                 ),
+                io.Float.Input(
+                    "context_noise", default=0.15, min=0.0, max=1.0, step=0.05,
+                    tooltip="续接头的重加噪强度（等价一采的 Context noise）。精修从中段 σ 起跑，头部若完全锁死（0）属于分布外输入，镜 2 起会闪烁；0.1-0.2 让采样器轻度重净头部。头部会被裁掉、不进成片，调它只影响模型所见。",
+                ),
                 io.Custom("CLIP").Input(
                     "clip", optional=True, display_name="CLIP",
                     tooltip="CLIP（从 MiniMaxH3 长视频编排 连线）。未连接时按模型设置名字加载。",
@@ -1657,7 +1672,7 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
     def execute(cls, av_latent, segments, model, shift_video, shift_audio,
                 base_steps, coarse_steps, audio_policy,
                 release_clip=True, free_between_segments=True,
-                carry_source="anchor",
+                carry_source="anchor", context_noise=0.15,
                 clip=None, video_vae=None, audio_vae=None,
                 noise=None):
         return io.NodeOutput(*run_refine_segments(
@@ -1668,6 +1683,7 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
             seed=0, seed_policy="fixed", cfg=1.0,
             release_clip=release_clip, free_between_segments=free_between_segments,
             audio_policy=audio_policy, carry_source=carry_source,
+            context_noise=context_noise,
             clip=clip, video_vae=video_vae, audio_vae=audio_vae,
             external_sigmas=None, external_noise=noise, external_sampler=None,
         ))

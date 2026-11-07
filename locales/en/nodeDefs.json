@@ -222,6 +222,9 @@
           "chained": "Chain refined output"
         }
       },
+      "context_noise": {
+        "name": "Carry Head Context Noise"
+      },
       "clip": {
         "name": "CLIP"
       },

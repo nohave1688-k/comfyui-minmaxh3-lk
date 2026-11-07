@@ -226,6 +226,9 @@
           "chained": "链式精修（接缝最顺）"
         }
       },
+      "context_noise": {
+        "name": "续接头重加噪"
+      },
       "clip": {
         "name": "CLIP"
       },
