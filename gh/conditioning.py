@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import ast
 import inspect
+import logging
 import math
+import weakref
 from pathlib import Path
 
 import torch
@@ -33,6 +35,62 @@ MIN_REFERENCE_VIDEO_PIXELS = 300_000
 MAX_REFERENCE_VIDEO_PIXELS = 1_600_000
 REFS_OVERWRITE = "refs_overwrite"
 KEYFRAME_REF_CONCAT = "concat"
+
+
+# Cross-pass conditioning-encode cache: pass 1 and the refine pass build the
+# SAME shot conditioning twice (identical packed prompt and reference media —
+# both passes load the same temp files and resize them with the same policy),
+# and each encode runs the full Qwen3VL text encoder (~15-20s per shot with
+# the load/unload dance).  Cache entries are keyed by the clip instance (via
+# weakref, so a swapped CLIP can never hit a stale entry), the packed prompt,
+# and content fingerprints of every tensor fed into tokenize.  Cached objects
+# are safe to share: conditioning_set_values copies before attaching
+# per-pass refs/keyframes.
+_ENCODE_CACHE: dict[tuple, object] = {}
+_ENCODE_CACHE_MAX = 16
+
+
+def _tensor_fingerprint(tensor) -> tuple:
+    t = tensor.detach()
+    if t.device.type != "cpu":
+        t = t.cpu()
+    t = t.float()
+    return (tuple(t.shape), str(t.dtype), float(t.sum().item()))
+
+
+def _encode_fingerprint(packed_prompt, branch, ref_items, keyframe_images):
+    parts = [
+        packed_prompt,
+        branch,
+        tuple(
+            (
+                item.get("type"),
+                _tensor_fingerprint(item["data"]) if "data" in item else None,
+                tuple(item.get("timestamps") or ()),
+            )
+            for item in (ref_items or [])
+        ),
+        tuple(_tensor_fingerprint(image) for image in (keyframe_images or ())),
+    ]
+    return tuple(parts)
+
+
+def _cached_conditioning_encode(clip, tokens, cache_key):
+    clip_ref = weakref.ref(clip)
+    key = (clip_ref, cache_key)
+    cached = _ENCODE_CACHE.get(key)
+    if cached is not None:
+        logging.info("[LKH3] 命中条件编码缓存 —— 跳过文本编码器前向")
+        return cached
+    conditioning = clip.encode_from_tokens_scheduled(tokens)
+    if len(_ENCODE_CACHE) >= _ENCODE_CACHE_MAX:
+        # Evict dead-clip entries first, then the oldest entry.
+        for stale in [k for k in _ENCODE_CACHE if k[0]() is None]:
+            _ENCODE_CACHE.pop(stale, None)
+        while len(_ENCODE_CACHE) >= _ENCODE_CACHE_MAX:
+            _ENCODE_CACHE.pop(next(iter(_ENCODE_CACHE)))
+    _ENCODE_CACHE[key] = conditioning
+    return conditioning
 
 
 def _const_str(node):
@@ -556,14 +614,17 @@ def build_conditioning(
         else:
             refs = real_ref_blocks
         tokens = clip.tokenize(packed_prompt, minimax_ref_items=ref_items)
+        encode_key = _encode_fingerprint(packed_prompt, "hybrid", ref_items, ())
     elif real_ref_blocks:
         refs = real_ref_blocks
         tokens = clip.tokenize(packed_prompt, minimax_ref_items=real_ref_items)
+        encode_key = _encode_fingerprint(packed_prompt, "refs", real_ref_items, ())
     else:
         refs = []
         tokens = clip.tokenize(packed_prompt, images=keyframe_images)
+        encode_key = _encode_fingerprint(packed_prompt, "keyframes", (), keyframe_images)
 
-    conditioning = clip.encode_from_tokens_scheduled(tokens)
+    conditioning = _cached_conditioning_encode(clip, tokens, encode_key)
     values = {}
     if keyframes:
         values.update({"minimax_keyframes": keyframes, "minimax_frame_count": frame_count})

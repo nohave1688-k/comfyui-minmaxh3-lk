@@ -1424,6 +1424,40 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
             )
             entries = rebuilt
 
+    # Identity shortcut: at denoise <= 0.05 the refine re-noises ~5% and steps
+    # straight back — indistinguishable from the input while still paying for
+    # model loading, CLIP conditioning and per-shot sampling.  Skip all of it
+    # and hand the (layout-corrected) upscaled latent through unchanged.
+    if float(refine_entry_sigma) <= 0.05:
+        out = {
+            "samples": refined_latent["samples"],
+            "gh_h3_audio_mode": refined_latent.get("gh_h3_audio_mode")
+            or plan.get("audio_mode") or "native",
+            "lk_layout": {
+                "version": 1,
+                "pass": "second-identity",
+                "latent_continue": bool(plan.get("latent_continue", True)),
+                "range": {"start": start + 1, "end": end + 1},
+                "video_hw": [int(video.shape[3]), int(video.shape[4])],
+                "segments": [
+                    {
+                        "segment": start + 1 + i,
+                        "video_offset": int(e["video_offset"]),
+                        "video_tokens": int(e["video_tokens"]),
+                        "audio_offset": int(e["audio_offset"]),
+                        "audio_steps": int(e["audio_steps"]),
+                        "frames": _pixel_frames_from_latent_t(int(e["video_tokens"])),
+                    }
+                    for i, e in enumerate(entries[start:end + 1])
+                ],
+            },
+        }
+        logging.info(
+            "[LKH3] 精修恒等跳过: denoise=%.2f ≤ 0.05 —— 直接返回放大潜空间（布局已校正）",
+            float(refine_entry_sigma),
+        )
+        return out, None
+
     # Per-shot conditioning must be built at the UPSCALED canvas so the
     # reference images re-encode in HD (the HIGH-conditioning equivalent).
     height = int(video.shape[3]) * 16
