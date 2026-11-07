@@ -1462,10 +1462,16 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
         if carry_source != "chained" and index > start:
             prev_entry = entries[index - 1 - start]
             tokens = min(CARRY_TOKENS, int(prev_entry["video_tokens"]))
-            audio_steps = (
-                0 if audio_policy == "keep"
-                else min(CARRY_AUDIO_STEPS, int(prev_entry["audio_steps"]))
-            )
+            # The audio head is carried EVEN with audio_policy="keep": H3
+            # generates video and audio jointly and aligns them positionally
+            # within the window, so a video head without the matching audio
+            # head desyncs the streams by ~CARRY_FRAMES for every shot after
+            # the first (the model then denoises video against soundtrack that
+            # belongs ~1s later - lip/eye jitter and flicker).  The carried
+            # audio is locked at denoise-mask 0 and the output audio is still
+            # replaced by the first pass's own span below, so the film's
+            # soundtrack stays verbatim.
+            audio_steps = min(CARRY_AUDIO_STEPS, int(prev_entry["audio_steps"]))
             if tokens > 0:
                 pv0, pvt = int(prev_entry["video_offset"]), int(prev_entry["video_tokens"])
                 pa0, pat = int(prev_entry["audio_offset"]), int(prev_entry["audio_steps"])
@@ -1480,7 +1486,9 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
         elif carry_source == "chained" and previous_samples is not None:
             prev_video, prev_audio = previous_samples.unbind()
             tokens = min(CARRY_TOKENS, int(prev_video.shape[2]))
-            audio_steps = min(CARRY_AUDIO_STEPS, int(prev_audio.shape[-1])) if audio_policy != "keep" else 0
+            # See the anchor branch: the audio head is required for model-side
+            # A/V alignment even when the output audio is kept verbatim.
+            audio_steps = min(CARRY_AUDIO_STEPS, int(prev_audio.shape[-1]))
             if tokens > 0:
                 head_video = prev_video[..., -tokens:, :, :]
                 head_audio = prev_audio[..., -audio_steps:] if audio_steps > 0 else None
@@ -1522,15 +1530,17 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
         out_video, out_audio = nested_av_parts(samples)
         if audio_mode is None:
             audio_mode = samples.get("gh_h3_audio_mode") or plan.get("audio_mode") or "native"
-        if audio_policy == "keep":
-            # Composite the first pass's audio back verbatim: the refine pass
-            # must not rewrite already-generated speech/ambience.
-            out_audio = seg_audio
         if carry_t > 0:
             # Trim the duplicated carried span so the assembled film keeps the
             # upscaled layout's offsets 1:1.
             out_video = out_video[..., carry_t:, :, :]
             out_audio = out_audio[..., carry_a:]
+        if audio_policy == "keep":
+            # Composite the first pass's audio back verbatim AFTER the trim:
+            # the sampled window carries the locked previous-tail audio only
+            # for model-side A/V alignment - the film's soundtrack stays the
+            # first pass's own span, untouched.
+            out_audio = seg_audio
         previous_samples = samples["samples"]
         collected.append({
             "segment": index + 1,
