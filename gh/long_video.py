@@ -35,7 +35,7 @@ import comfy.samplers
 import comfy.utils
 
 from .conditioning import build_conditioning
-from .core import empty_av_latent, nested_av_parts
+from .core import RUNTIME_TYPE, empty_av_latent, nested_av_parts, runtime_parts
 from .sampling import (
     DEFAULT_SAMPLER_NAME,
     DEFAULT_SCHEDULER_NAME,
@@ -1264,20 +1264,12 @@ class MiniMaxH3SegmentGuiderGH(io.ComfyNode):
                                tooltip="接缝处对续接上下文帧加噪。0 完全保留上一镜尾帧。"),
                 io.Boolean.Input(
                     "release_clip", default=True, advanced=True,
-                    tooltip="全部镜头的条件化预构建完成后、首镜采样前卸载一次文本编码器（整轮只加载/卸载各一次）。显存紧张保持开启。",
+                    tooltip="每镜采样前卸载文本编码器，下镜条件构建时再加载。显存紧张保持开启。",
                 ),
                 io.Boolean.Input("free_between_segments", default=True, advanced=True),
-                io.Vae.Input(
-                    "video_vae", optional=True, display_name="视频 VAE",
-                    tooltip="视频 VAE（从 长视频编排 节点连线），用于参考图编码。未连接时按模型设置名字加载。",
-                ),
-                io.Vae.Input(
-                    "audio_vae", optional=True, display_name="音频 VAE",
-                    tooltip="音频 VAE（从 长视频编排 节点连线）。未连接时按模型设置名字加载。",
-                ),
-                io.Custom("CLIP").Input(
-                    "clip", optional=True, display_name="CLIP",
-                    tooltip="CLIP（从 长视频编排 节点的 CLIP 输出连线），用于逐镜条件构建。未连接时按名字加载。",
+                io.Custom(RUNTIME_TYPE).Input(
+                    "runtime", optional=True, display_name="解码设置",
+                    tooltip="CLIP + 视频/音频 VAE 捆绑 — 从 长视频编排 的 解码设置 连一根线即可。未连接时按模型设置名字加载。",
                 ),
             ],
             outputs=[
@@ -1301,10 +1293,11 @@ class MiniMaxH3SegmentGuiderGH(io.ComfyNode):
                 sampler_name, scheduler,
                 seed_policy, context_noise,
                 release_clip=True, free_between_segments=True,
-                video_vae=None, audio_vae=None, clip=None):
+                runtime=None):
         plan = segments
         if not isinstance(plan, dict) or not plan.get("segments"):
             raise ValueError("Connect the storyboard node's 'segments' output to the segment guider.")
+        clip, video_vae, audio_vae = runtime_parts(runtime)
         if clip is not None:
             plan["clip"] = clip
         if video_vae is not None:
@@ -1809,17 +1802,9 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
                     optional=True,
                     tooltip="精修去噪强度（denoise）。T8 发布配方：simple 调度、3 步、denoise 0.30（上限 0.40）——二采是轻度 img2img 润色而不是重生成，0.94 入口的重生成正是网格斑/颜色漂移的来源。噪声来自全片共享的全局噪声场按位置切片，邻镜重建相互关联。",
                 ),
-                io.Custom("CLIP").Input(
-                    "clip", optional=True, display_name="CLIP",
-                    tooltip="CLIP（从 MiniMaxH3 长视频编排 连线）。未连接时按模型设置名字加载。",
-                ),
-                io.Vae.Input(
-                    "video_vae", optional=True, display_name="视频 VAE",
-                    tooltip="视频 VAE（从 MiniMaxH3 长视频编排 连线）。未连接时按模型设置名字加载。",
-                ),
-                io.Vae.Input(
-                    "audio_vae", optional=True, display_name="音频 VAE",
-                    tooltip="音频 VAE（从 MiniMaxH3 长视频编排 连线）。未连接时按模型设置名字加载。",
+                io.Custom(RUNTIME_TYPE).Input(
+                    "runtime", optional=True, display_name="解码设置",
+                    tooltip="CLIP + 视频/音频 VAE 捆绑 — 从 长视频编排 的 解码设置 连一根线即可。未连接时按模型设置名字加载。",
                 ),
                 io.Noise.Input(
                     "noise", optional=True, display_name="噪声",
@@ -1840,8 +1825,8 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
                 release_clip=True, free_between_segments=True,
                 carry_source="anchor", context_noise=0.15,
                 refine_entry_sigma=0.30,
-                clip=None, video_vae=None, audio_vae=None,
-                noise=None):
+                runtime=None, noise=None):
+        clip, video_vae, audio_vae = runtime_parts(runtime)
         return io.NodeOutput(*run_refine_segments(
             model, segments, av_latent,
             base_steps=base_steps, coarse_steps=coarse_steps,

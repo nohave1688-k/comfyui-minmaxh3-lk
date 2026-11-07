@@ -99,13 +99,9 @@
         "name": "AV 潜空间",
         "tooltip": "长视频分段采样（或下游采样链）输出的嵌套 AV 潜空间。"
       },
-      "video_vae": {
-        "name": "视频 VAE",
-        "tooltip": "视频 VAE（从 MiniMaxH3 长视频编排 节点连线）。"
-      },
-      "audio_vae": {
-        "name": "音频 VAE",
-        "tooltip": "音频 VAE（从 MiniMaxH3 长视频编排 节点连线）。"
+      "runtime": {
+        "name": "解码设置",
+        "tooltip": "CLIP + 视频/音频 VAE 捆绑 — 从 长视频编排 的 解码设置 连一根线。"
       }
     },
     "outputs": {
@@ -121,7 +117,7 @@
   },
   "LKH3SegmentGuider": {
     "display_name": "MiniMax-H3 分段引导（LK）",
-    "description": "一采的 T8 写法：GUIDER 对象内部承担分段循环（逐镜条件+LoRA、潜空间续接），并直接产出与之配套的 SAMPLER/SIGMAS——steps/shifts 单一来源，无重复契约节点。四个输出口接 SamplerCustomAdvanced（sampler/sigmas 用本节点的，noise 任意，latent_image 用空白AV模板）。",
+    "description": "一采的 T8 写法：GUIDER 对象内部承担分段循环（逐镜条件+LoRA、潜空间续接），并直接产出与之配套的 SAMPLER/SIGMAS——steps/shifts 单一来源，无重复契约节点。三个输出口（GUIDER/SAMPLER/SIGMAS）接 SamplerCustomAdvanced，noise 接任意 NOISE 原语、latent_image 接空白AV模板。",
     "inputs": {
       "model": {
         "name": "模型"
@@ -148,20 +144,14 @@
         "tooltip": "接缝处对续接上下文帧加噪。0 完全保留上一镜尾帧。"
       },
       "release_clip": {
-        "name": "分段间释放文本编码器"
+        "name": "采样前释放文本编码器"
       },
       "free_between_segments": {
         "name": "分段间释放缓存"
       },
-      "video_vae": {
-        "name": "视频 VAE"
-      },
-      "audio_vae": {
-        "name": "音频 VAE"
-      },
-      "clip": {
-        "name": "CLIP",
-        "tooltip": "CLIP（从 MiniMaxH3 长视频编排 节点的 CLIP 输出连线），用于逐镜条件构建。未连接时按模型设置名字加载。"
+      "runtime": {
+        "name": "解码设置",
+        "tooltip": "CLIP + 视频/音频 VAE 捆绑 — 从 长视频编排 的 解码设置 连一根线。未连接时按模型设置名字加载。"
       },
       "sampler_name": {
         "name": "采样器",
@@ -214,7 +204,7 @@
         }
       },
       "release_clip": {
-        "name": "分段间释放文本编码器"
+        "name": "采样前释放文本编码器"
       },
       "free_between_segments": {
         "name": "分段间释放缓存"
@@ -233,14 +223,9 @@
       "refine_entry_sigma": {
         "name": "精修去噪强度 (denoise)"
       },
-      "clip": {
-        "name": "CLIP"
-      },
-      "video_vae": {
-        "name": "视频 VAE"
-      },
-      "audio_vae": {
-        "name": "音频 VAE"
+      "runtime": {
+        "name": "解码设置",
+        "tooltip": "CLIP + 视频/音频 VAE 捆绑 — 从 长视频编排 的 解码设置 连一根线。未连接时按模型设置名字加载。"
       },
       "noise": {
         "name": "噪声"
@@ -352,14 +337,8 @@
         "tooltip": "整段空白 AV 模板（含 lk_layout）— 接 双钟采样/T8契约 的 av_latent 和 SamplerCustomAdvanced 的 latent_image。"
       },
       "2": {
-        "name": "CLIP",
-        "tooltip": "CLIP 连线输出 — 接 采样器/分段引导/二跑分段精修 的 CLIP 输入。"
-      },
-      "3": {
-        "name": "视频 VAE"
-      },
-      "4": {
-        "name": "音频 VAE"
+        "name": "解码设置",
+        "tooltip": "CLIP + 视频 VAE + 音频 VAE 捆绑 — 一根线接 分段引导/二跑分段精修/AV 解码 的 解码设置 输入。"
       }
     }
   }

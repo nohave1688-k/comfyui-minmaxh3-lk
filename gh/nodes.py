@@ -21,7 +21,7 @@ from comfy_api.latest._input_impl import VideoFromFile
 from comfy_extras import nodes_audio
 
 from .conditioning import build_conditioning
-from .core import align_frame_count_down
+from .core import RUNTIME_TYPE, align_frame_count_down
 from ..refmod.nodes import load_visual_mods
 from .long_video import (
     MAX_SEGMENTS,
@@ -515,17 +515,9 @@ class MiniMaxH3ComposerGH(io.ComfyNode):
                     "av_template", display_name="空白AV模板",
                     tooltip="整段空白 AV 模板（含 lk_layout）— 接 双钟采样/T8契约 的 av_latent 和 SamplerCustomAdvanced 的 latent_image。",
                 ),
-                io.Custom("CLIP").Output(
-                    "clip", display_name="CLIP",
-                    tooltip="CLIP 连线输出 — 接 采样器/分段引导/二跑分段精修 的 CLIP 输入。",
-                ),
-                io.Vae.Output(
-                    "video_vae", display_name="视频 VAE",
-                    tooltip="视频 VAE 连线输出 — 接 采样器/二跑分段精修/AV 解码。",
-                ),
-                io.Vae.Output(
-                    "audio_vae", display_name="音频 VAE",
-                    tooltip="音频 VAE 连线输出 — 接 采样器/二跑分段精修/AV 解码。",
+                io.Custom(RUNTIME_TYPE).Output(
+                    "runtime", display_name="解码设置",
+                    tooltip="CLIP + 视频 VAE + 音频 VAE 捆绑 — 一根线接 分段引导/二跑分段精修/AV 解码 的 解码设置 输入。",
                 ),
             ],
         )
@@ -556,7 +548,8 @@ class MiniMaxH3ComposerGH(io.ComfyNode):
         start = int(plan["range"]["start"]) - 1
         end = int(plan["range"]["end"]) - 1
         template = build_empty_plan_latent(plan, start, end)
-        return io.NodeOutput(plan, template, clip, video_vae, audio_vae)
+        runtime = {"clip": clip, "video_vae": video_vae, "audio_vae": audio_vae}
+        return io.NodeOutput(plan, template, runtime)
 
 class MiniMaxH3ShotGH(io.ComfyNode):
     """One shot of the long video: duration, prompt, reference media and

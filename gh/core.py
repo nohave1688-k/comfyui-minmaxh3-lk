@@ -199,3 +199,20 @@ def replace_audio_latent(av_latent: dict, encoded_audio: torch.Tensor, denoise_s
     output["samples"] = comfy.nested_tensor.NestedTensor((video, fitted))
     output["noise_mask"] = comfy.nested_tensor.NestedTensor((video_mask, audio_mask))
     return output
+
+
+# Bundled CLIP + video/audio VAE socket ("解码设置"): the composer loads the
+# three runtime models once and hands them downstream as ONE wire instead of
+# three.  A plain dict is enough — sockets only need a stable type string.
+RUNTIME_TYPE = "LK_H3_RUNTIME"
+
+
+def runtime_parts(runtime):
+    """Unpack a 解码设置 bundle into ``(clip, video_vae, audio_vae)``.
+
+    Tolerates None (socket left unconnected) and dicts missing entries, so
+    callers can keep their name-based fallbacks for whatever is absent.
+    """
+    if isinstance(runtime, dict):
+        return runtime.get("clip"), runtime.get("video_vae"), runtime.get("audio_vae")
+    return None, None, None

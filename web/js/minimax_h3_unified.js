@@ -1989,6 +1989,73 @@ app.registerExtension({
             };
             return;
         }
+        // Output-list self-healing for the runtime-bundle consolidation: old
+        // canvases serialize the composer's 5 outputs (CLIP/VAEs removed),
+        // the decode node's 4 outputs (latents removed) and the refine's 2
+        // (conditioning removed) - truncate ghosts and relocate same-type
+        // wires, mirroring the guider's fix.
+        const RUNTIME_OUTPUTS = {
+            LKH3Composer: [
+                { name: "segments", type: "LANXI_H3_SEGMENTS" },
+                { name: "空白AV模板", type: "LATENT" },
+                { name: "解码设置", type: "LK_H3_RUNTIME" },
+            ],
+            LKH3AVDecode: [
+                { name: "frames", type: "IMAGE" },
+                { name: "audio", type: "AUDIO" },
+            ],
+            LKH3RefineSegments: [
+                { name: "AV 潜空间", type: "LATENT" },
+            ],
+        };
+        if (RUNTIME_OUTPUTS[nodeData.name]) {
+            const EXPECTED = RUNTIME_OUTPUTS[nodeData.name];
+            const fixNodeOutputs = (node) => {
+                if (!node.outputs) return;
+                for (let i = 0; i < EXPECTED.length; i++) {
+                    const want = EXPECTED[i];
+                    const slot = node.outputs[i];
+                    if (slot) {
+                        if (slot.name !== want.name) slot.name = want.name;
+                        if (slot.type !== want.type) slot.type = want.type;
+                    } else {
+                        node.addOutput(want.name, want.type);
+                    }
+                }
+                if (node.outputs.length > EXPECTED.length) {
+                    for (let i = EXPECTED.length; i < node.outputs.length; i++) {
+                        for (const lid of (node.outputs[i].links || []).slice()) {
+                            const all = node.graph?._links;
+                            const lk = typeof all?.get === "function" ? all.get(lid) : all?.[lid];
+                            if (!lk || lk.origin_id !== node.id) continue;
+                            const target = EXPECTED.findIndex((e) => e.type === lk.type);
+                            if (target < 0) continue;
+                            const dst = node.outputs[target];
+                            dst.links = dst.links || [];
+                            if (!dst.links.includes(lid)) dst.links.push(lid);
+                            lk.origin_slot = target;
+                        }
+                    }
+                    node.outputs.length = EXPECTED.length;
+                    node.setDirtyCanvas?.(true, true);
+                }
+            };
+            const previousCreated = nodeType.prototype.onNodeCreated;
+            nodeType.prototype.onNodeCreated = function() {
+                const result = previousCreated?.apply(this, arguments);
+                fixNodeOutputs(this);
+                return result;
+            };
+            const previousConfigure = nodeType.prototype.onConfigure;
+            nodeType.prototype.onConfigure = function() {
+                const result = previousConfigure?.apply(this, arguments);
+                fixNodeOutputs(this);
+                requestAnimationFrame(() => fixNodeOutputs(this));
+                setTimeout(() => fixNodeOutputs(this), 100);
+                return result;
+            };
+            return;
+        }
         if (nodeData.name === "LKH3Shot") {
             const previousShot = nodeType.prototype.onNodeCreated;
             nodeType.prototype.onNodeCreated = function() {

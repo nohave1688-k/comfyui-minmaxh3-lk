@@ -11,7 +11,14 @@ from comfy import model_management
 from comfy_api.latest import io
 from comfy_extras.nodes_audio import vae_decode_audio
 
-from .core import encode_audio_once, nested_av_parts, replace_audio_latent, validate_audio
+from .core import (
+    RUNTIME_TYPE,
+    encode_audio_once,
+    nested_av_parts,
+    replace_audio_latent,
+    runtime_parts,
+    validate_audio,
+)
 
 
 def clean_generated_audio_start(audio: dict) -> dict:
@@ -267,13 +274,9 @@ class MiniMaxH3AVDecodeGH(io.ComfyNode):
                     "av_latent",
                     tooltip="长视频分段采样（或下游采样链）输出的嵌套 AV 潜空间。",
                 ),
-                io.Vae.Input(
-                    "video_vae",
-                    tooltip="视频 VAE（从 MiniMaxH3 长视频编排 节点连线）。",
-                ),
-                io.Vae.Input(
-                    "audio_vae",
-                    tooltip="音频 VAE（从 MiniMaxH3 长视频编排 节点连线）。",
+                io.Custom(RUNTIME_TYPE).Input(
+                    "runtime", display_name="解码设置",
+                    tooltip="CLIP + 视频/音频 VAE 捆绑 — 从 MiniMaxH3 长视频编排 的 解码设置 连一根线。",
                 ),
             ],
             outputs=[
@@ -289,7 +292,12 @@ class MiniMaxH3AVDecodeGH(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, av_latent, video_vae, audio_vae):
+    def execute(cls, av_latent, runtime):
+        _clip, video_vae, audio_vae = runtime_parts(runtime)
+        if video_vae is None or audio_vae is None:
+            raise ValueError(
+                "AV解码 缺少 解码设置 —— 请把 MiniMaxH3 长视频编排 的 解码设置 输出连到本节点。"
+            )
         frames, audio, _video_latent, _audio_latent = decode_av_latent(
             av_latent, video_vae, audio_vae
         )
