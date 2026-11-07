@@ -1499,31 +1499,44 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
                 torch.cat([head_audio.to(seg_audio), seg_audio], dim=-1)
                 if head_audio is not None else seg_audio
             )
-            video_mask = torch.ones(
-                (1, 1, window_video.shape[2], window_video.shape[3], window_video.shape[4]),
-                device=window_video.device, dtype=torch.float32,
-            )
+            carry_t, carry_a = tokens, audio_steps
+        else:
+            window_video = seg_video
+            window_audio = seg_audio
+        video_mask = torch.ones(
+            (1, 1, window_video.shape[2], window_video.shape[3], window_video.shape[4]),
+            device=window_video.device, dtype=torch.float32,
+        )
+        if carry_t > 0:
             # The head must NOT be hard-locked at 0: the refine pass starts at
             # sigma[coarse] (mid-schedule), and a zero-noise head amid a
             # half-noisy span is an out-of-distribution input for the temporal
-            # attention - the span's early frames get pulled toward the head's
-            # clean statistics and the trajectory oscillates (visible flicker
-            # in every shot after the first, in BOTH carry modes, while shot 1
-            # - which has no head - stays clean; pass 1 shows the same knob
-            # fixes it).  context_noise keeps the head lightly noised so it
+            # attention.  context_noise keeps the head lightly noised so it
             # stays in-distribution; the head is trimmed from the output, so
             # this only affects what the model sees.
             video_mask[..., :tokens, :, :] = max(0.0, min(1.0, float(context_noise)))
+        if audio_policy == "keep":
+            # Lock the ENTIRE audio stream, not just the head: the soundtrack
+            # is kept verbatim anyway, so re-noising and re-denoising the audio
+            # span through the refine schedule only churns the joint window's
+            # conditioning - the video would be denoised against an audio
+            # stream whose noise level changes every step, a frame-to-frame
+            # color/texture drift suspect.  A fully locked audio latent is
+            # exactly the model's trained lock_source mode.
+            audio_mask = torch.zeros(
+                (1, 1, window_audio.shape[2], window_audio.shape[3]),
+                device=window_audio.device, dtype=torch.float32,
+            )
+        else:
             audio_mask = torch.ones(
                 (1, 1, window_audio.shape[2], window_audio.shape[3]),
                 device=window_audio.device, dtype=torch.float32,
             )
-            if audio_steps > 0:
-                audio_mask[..., :audio_steps] = 0.0
-            seg_latent = dict(seg_latent)
-            seg_latent["samples"] = comfy.nested_tensor.NestedTensor((window_video, window_audio))
-            seg_latent["noise_mask"] = comfy.nested_tensor.NestedTensor((video_mask, audio_mask))
-            carry_t, carry_a = tokens, audio_steps
+            if carry_a > 0:
+                audio_mask[..., :carry_a] = 0.0
+        seg_latent = dict(seg_latent)
+        seg_latent["samples"] = comfy.nested_tensor.NestedTensor((window_video, window_audio))
+        seg_latent["noise_mask"] = comfy.nested_tensor.NestedTensor((video_mask, audio_mask))
         bundle = dict(bundle)
         bundle["av_latent"] = seg_latent
 
