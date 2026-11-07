@@ -219,7 +219,8 @@
         "name": "Carry Source",
         "options": {
           "anchor": "Anchor to first pass (no compounding)",
-          "chained": "Chain refined output"
+          "chained": "Chain refined output",
+          "none": "none (no carry, diagnostic)"
         }
       },
       "context_noise": {

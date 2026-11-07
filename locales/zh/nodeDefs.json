@@ -223,7 +223,8 @@
         "name": "续接来源",
         "options": {
           "anchor": "锚定首采（防逐镜复利）",
-          "chained": "链式精修（接缝最顺）"
+          "chained": "链式精修（接缝最顺）",
+          "none": "不续接（诊断用）"
         }
       },
       "context_noise": {

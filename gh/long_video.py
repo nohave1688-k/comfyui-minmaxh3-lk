@@ -1460,7 +1460,7 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
         carry_t = carry_a = 0
         head_video = head_audio = None
         tokens = audio_steps = 0
-        if carry_source != "chained" and index > start:
+        if carry_source == "anchor" and index > start:
             prev_entry = entries[index - 1 - start]
             tokens = min(CARRY_TOKENS, int(prev_entry["video_tokens"]))
             # The audio head is carried EVEN with audio_policy="keep": H3
@@ -1649,8 +1649,8 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
                 ),
                 io.Boolean.Input("free_between_segments", default=True, advanced=True),
                 io.Combo.Input(
-                    "carry_source", options=["anchor", "chained"], default="anchor",
-                    tooltip="每镜续接上下文的来源。anchor = 取自放大的首采潜空间（固定质量锚点，逐镜不复利，8 镜以上全片质量均匀）；chained = 取上一镜的精修输出（接缝与精修结果严格连续，但逐镜链式累积）。两种模式的续接内容都是上一镜末帧——分镜各自参考不同图片不受影响，参考从不进入续接。",
+                    "carry_source", options=["anchor", "chained", "none"], default="anchor",
+                    tooltip="每镜续接上下文的来源。anchor = 取自放大的首采潜空间（固定质量锚点，逐镜不复利，8 镜以上全片质量均匀）；chained = 取上一镜的精修输出（接缝与精修结果严格连续，但逐镜链式累积）；none = 不续接，每镜独立精修（诊断用——若 none 干净而其他模式闪烁，问题在续接头机制）。三种模式的续接内容都是上一镜末帧——分镜各自参考不同图片不受影响，参考从不进入续接。",
                 ),
                 io.Float.Input(
                     "context_noise", default=0.15, min=0.0, max=1.0, step=0.05,
