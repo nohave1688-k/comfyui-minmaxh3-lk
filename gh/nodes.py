@@ -565,8 +565,11 @@ class MiniMaxH3ComposerGH(io.ComfyNode):
         runtime = {"clip": clip, "video_vae": video_vae, "audio_vae": audio_vae}
         # The bundle feeds THIS pack's nodes (one wire per consumer); the bare
         # clip/VAE outputs stay so third-party nodes (T8/lanxi samplers,
-        # decoders, generic VAE consumers) keep working unchanged.
-        return io.NodeOutput(plan, template, runtime, clip, video_vae, audio_vae)
+        # decoders, generic VAE consumers) keep working unchanged.  Order MUST
+        # mirror the outputs list: segments, template, CLIP, video VAE,
+        # audio VAE, runtime - a stray wire got the CLIP object as its "VAE"
+        # when this tuple lagged the definition reorder.
+        return io.NodeOutput(plan, template, clip, video_vae, audio_vae, runtime)
 
 class MiniMaxH3ShotGH(io.ComfyNode):
     """One shot of the long video: duration, prompt, reference media and
