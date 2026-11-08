@@ -1417,17 +1417,24 @@ def _learned_upscale_film(refined_latent, model_name, scale_by):
     video, audio = nested_av_parts(refined_latent)
     t = int(video.shape[2])
     h, w = int(video.shape[3]), int(video.shape[4])
-    pw = max(16, round(w * scale_by / 16) * 16)
-    ph = max(16, round(h * scale_by / 16) * 16)
-    if (pw, ph) == (w, h):
+    # Target size in PIXEL space, floored to the /16 token grid (official node
+    # semantics: it receives pixel width/height and divides by 16).  This keeps
+    # the scale isotropic: token-space rounding here once distorted 39x23 into
+    # 64x32 (anisotropy 1.18) and the learned resizer - which T8 gates behind a
+    # max_anisotropy of 1.05 - returned garbage (the mosaic report).
+    pt_h = max(16, int(h * 16 * scale_by) // 16)
+    pt_w = max(16, int(w * 16 * scale_by) // 16)
+    if (pt_h, pt_w) == (h, w):
         return refined_latent
-    size = (t, ph // 16, pw // 16)
+    size = (t, pt_h, pt_w)
     model_management.load_models_gpu(
         [patcher], memory_required=patcher.model.memory_required(video.shape, size)
     )
     upscaled = patcher.model(
         video.to(device=patcher.load_device, dtype=patcher.model_dtype()), size
     )
+    if not torch.isfinite(upscaled).all():
+        raise RuntimeError("学习型放大器产生了 NaN/Inf —— 请把控制台日志发回排查")
     upscaled = upscaled.to(device=model_management.intermediate_device(), dtype=video.dtype)
     out = dict(refined_latent)
     out["samples"] = comfy.nested_tensor.NestedTensor((upscaled, audio))
