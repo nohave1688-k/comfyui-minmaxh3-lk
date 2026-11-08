@@ -1667,6 +1667,7 @@ function createShotPanel(node) {
     let restoreEpoch = 0;
     let syncTimer = null;
     const shotWidgets = [];
+    let lastRowCount = 0;
 
     function parseShotJson(strict = false) {
         const sources = [node.properties?.[stateKey], shotJsonW?.value];
@@ -1832,6 +1833,7 @@ function createShotPanel(node) {
                 rebuildRows();
             });
         });
+        lastRowCount = shotWidgets.length;
         fit();
     }
 
@@ -1847,6 +1849,17 @@ function createShotPanel(node) {
     // Creation-time init is done: allow panel edits to sync (workflow
     // configure re-arms `restoring` through the hooks below).
     restoring = false;
+
+    // Watchdog for newer frontends (1.57.6+): they rebuild node.widgets from
+    // the schema definition and can wipe dynamically added (serialize:false)
+    // panel rows at any widget-store sync.  When the panel rows vanish while
+    // the state still holds rows, re-apply them.  Cheap (a filter per 1.5s),
+    // and it keeps the LoRA/RefMod editor alive across frontend updates.
+    const panelWatchdog = setInterval(() => {
+        if (!node.graph || restoring) return;
+        const alive = (node.widgets || []).filter(w => w._ghh3Shot).length;
+        if (lastRowCount > 0 && alive === 0) rebuildRows();
+    }, 1500);
 
     const oldSerialize = node.onSerialize;
     node.onSerialize = function(...args) {
@@ -1998,7 +2011,6 @@ app.registerExtension({
             // LKH3Composer deliberately NOT listed: its bundle output is
             // appended after the original five slots, so pre-bundle canvases
             // keep every bare wire on its original slot and need no healing.
-            LKH3AVDecode: [
             LKH3AVDecode: [
                 { name: "frames", type: "IMAGE" },
                 { name: "audio", type: "AUDIO" },
