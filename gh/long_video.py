@@ -547,6 +547,12 @@ def _persist_shot_media(shot, idx):
     return media
 
 
+def _clamp_shot_audio_mode(value) -> str:
+    """Per-shot audio mode from a LKH3Shot node: '' = follow the composer."""
+    mode = str(value or "").strip().lower()
+    return mode if mode in ("lock_source", "reference_only", "native") else ""
+
+
 def build_plan_from_shot_nodes(*, settings=None, shots, film_settings=None,
                                latent_continue=True, range_start=1, range_end=1,
                                clip=None, video_vae=None, audio_vae=None):
@@ -618,6 +624,7 @@ def build_plan_from_shot_nodes(*, settings=None, shots, film_settings=None,
             "mods": _clamp_shot_mods(shot.get("mods")),
             "loras": _clamp_shot_loras(shot.get("loras")),
             "index": idx,
+            "audio_mode": _clamp_shot_audio_mode(shot.get("audio_mode")),
             **_persist_shot_media(shot, idx),
         })
         connected_by_segment[idx] = {
@@ -1116,7 +1123,16 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
                 {"steps": int(steps), "shift_video": float(shift_video),
                  "shift_audio": float(shift_audio), "sampler_name": sampler_name,
                  "scheduler": scheduler, "cfg": float(cfg),
-                 "context_noise": float(context_noise), "seed_policy": seed_policy},
+                 "context_noise": float(context_noise), "seed_policy": seed_policy,
+                 # 外接采样原语（T8 双钟等）：sigmas 调度直接进键；noise/
+                 # sampler 是对象，仅记类型——更换外接配方请同时改任一采样
+                 # 参数强制 miss（复现说明里有说明）。
+                 "external": {
+                     "sigmas": (bundle_mod.sha256_tensor(external_sigmas)[:16]
+                                if external_sigmas is not None else None),
+                     "noise": type(external_noise).__name__ if external_noise is not None else None,
+                     "sampler": type(external_sampler).__name__ if external_sampler is not None else None,
+                 }},
                 bundle_mod.PASS_FIRST,
             )
             cache_key = bundle_mod.key_of(cache_spec, cache_carry)
@@ -1719,15 +1735,17 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
 
         # 二跑分段缓存：键含一跑本段切片 hash（anchor 模式下段间独立——一跑
         # 没变则逐段命中）与全部精修参数；chained 模式额外链上一段精修输出。
+        # pair_hash 在 cache_on 之内：未启用束时零额外开销。
         hit = False
-        cache_carry = (
-            "anchor" if carry_source == "anchor"
-            else (bundle_mod.pair_hash(*previous_samples.unbind())
-                  if previous_samples is not None else "none")
-        )
         cache_key = None
         cache_spec = None
+        cache_carry = "none"
         if cache_on:
+            cache_carry = (
+                "anchor" if carry_source == "anchor"
+                else (bundle_mod.pair_hash(*previous_samples.unbind())
+                      if previous_samples is not None else "none")
+            )
             cache_spec = bundle_mod.spec_hash(
                 plan, index, seg_seed,
                 {"base_steps": int(base_steps), "coarse_steps": int(coarse_steps),
@@ -1744,6 +1762,10 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
                 cached = bundle_mod.load_segment(bundle_dir, bundle_mod.PASS_SECOND, index)
                 if cached is not None:
                     hit = True
+                    if audio_mode is None:
+                        # 命中路径没有 samples dict 可读音频模式——直接取
+                        # plan（窗口 conditioning 的模式本就来自 plan）。
+                        audio_mode = plan.get("audio_mode") or "native"
                     if logging.getLogger().isEnabledFor(logging.INFO):
                         logging.info("[LKH3] 二跑缓存命中：镜头%d（键 %s…）", index + 1, cache_key[:8])
                     if index == start:
