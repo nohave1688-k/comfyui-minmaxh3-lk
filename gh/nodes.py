@@ -22,6 +22,7 @@ from comfy_extras import nodes_audio
 
 from .conditioning import build_conditioning
 from .core import RUNTIME_TYPE, align_frame_count_down
+from . import bundle as gh_bundle
 from ..refmod.nodes import load_visual_mods
 from .long_video import (
     MAX_SEGMENTS,
@@ -493,6 +494,10 @@ class MiniMaxH3ComposerGH(io.ComfyNode):
                 "range_end", default=1, min=1, max=MAX_SEGMENTS, step=1,
                 tooltip="Last shot to run (inclusive).",
             ),
+            io.String.Input(
+                "project_dir", default="", optional=True,
+                tooltip="项目目录：填入一个文件夹路径即启用「项目束」——分段 latent 缓存、参考媒体副本、复现说明与工作流快照都落在里面（推荐指向 output 下的专用子文件夹）。留空 = 完全旧行为。",
+            ),
         ]
         for i in range(1, MAX_SEGMENTS + 1):
             schema_inputs.append(io.Custom("LK_H3_SHOT").Input(
@@ -545,7 +550,7 @@ class MiniMaxH3ComposerGH(io.ComfyNode):
     def execute(cls, film_prompt, clip_name, video_vae_name, audio_vae_name,
                 aspect, megapixels, ref_image_size, audio_mode,
                 latent_continue=True, range_start=1, range_end=1,
-                shot_1=None, shot_2=None, shot_3=None, shot_4=None,
+                project_dir="", shot_1=None, shot_2=None, shot_3=None, shot_4=None,
                 shot_5=None, shot_6=None, shot_7=None, shot_8=None):
         # Loaders cache by name — the same objects the samplers would load.
         clip = nodes.CLIPLoader().load_clip(clip_name, "minimax")[0] if clip_name else None
@@ -564,6 +569,44 @@ class MiniMaxH3ComposerGH(io.ComfyNode):
             range_start=range_start, range_end=range_end,
             clip=clip, video_vae=video_vae, audio_vae=audio_vae,
         )
+        # 项目束（opt-in）：填了「项目目录」才启用缓存/参考副本/复现说明；
+        # 留空 = 三个键全 None，下游一切照旧。身份刻意不含逐镜内容——
+        # 改某一镜的提示词不变更束，只有结构变更（模型/画布/镜数）才换束。
+        plan["bundle_dir"] = plan["film_key"] = None
+        plan["cache_enabled"] = False
+        if (project_dir or "").strip():
+            identity = gh_bundle.film_identity(
+                clip_name=clip_name, video_vae_name=video_vae_name,
+                audio_vae_name=audio_vae_name,
+                width=plan["width"], height=plan["height"],
+                segment_count=len(plan["segments"]),
+            )
+            resolved = gh_bundle.resolve_bundle(project_dir, identity)
+            if resolved is not None:
+                bundle_dir, manifest = resolved["dir"], resolved["manifest"]
+                gh_bundle.persist_refs(bundle_dir, manifest, shots)
+                doc_payload = {
+                    "film_prompt": film_prompt,
+                    "shots": [
+                        {
+                            "segment": shot_index + 1,
+                            "duration": plan["segments"][shot_index]["duration"],
+                            "prompt": plan["segments"][shot_index]["prompt"],
+                            "loras": plan["segments"][shot_index].get("loras"),
+                            "mods": plan["segments"][shot_index].get("mods"),
+                            "ref_files": [
+                                ref["file"] for ref in manifest.get("refs") or []
+                                if any(slot.startswith(f"shot{shot_index + 1}.")
+                                       for slot in ref.get("slots") or [])
+                            ],
+                        }
+                        for shot_index in range(len(plan["segments"]))
+                    ],
+                }
+                gh_bundle.write_doc(bundle_dir, manifest, doc_payload)
+                plan["bundle_dir"] = bundle_dir
+                plan["film_key"] = resolved["film_key"]
+                plan["cache_enabled"] = os.environ.get("LK_SEGMENT_CACHE", "1") != "0"
         start = int(plan["range"]["start"]) - 1
         end = int(plan["range"]["end"]) - 1
         template = build_empty_plan_latent(plan, start, end)
@@ -629,11 +672,15 @@ class MiniMaxH3ShotGH(io.ComfyNode):
                 ref_audio_1=None, ref_audio_2=None, ref_audio_3=None,
                 shot_json=""):
         mods, loras = [], []
+        audio_mode = ""
         try:
             parsed = json.loads(shot_json) if isinstance(shot_json, str) and shot_json.strip() else {}
             if isinstance(parsed, dict):
                 mods = parsed.get("mods") or []
                 loras = parsed.get("loras") or []
+                shot_audio = str(parsed.get("audio_mode") or "").strip().lower()
+                if shot_audio in ("lock_source", "reference_only", "native"):
+                    audio_mode = shot_audio
         except (TypeError, ValueError):
             pass
         images = [t for t in (ref_image_1, ref_image_2, ref_image_3,
@@ -650,4 +697,5 @@ class MiniMaxH3ShotGH(io.ComfyNode):
             "audios": audios,
             "mods": mods,
             "loras": loras,
+            "audio_mode": audio_mode,
         })

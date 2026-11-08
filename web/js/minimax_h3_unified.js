@@ -333,6 +333,211 @@ function openRefModPicker(onPick) {
     return dismiss;
 }
 
+// ── 项目束接回（load project bundle）───────────────────────────────────────
+// "变相的图片拖入"：束里的 workflow.json 是跑片时的完整工作流快照；
+// 接回 = 指向文件夹 → 恢复画布 → 弹窗给出缓存状态与参考回填。
+
+const BUNDLE_ROUTES = {
+    inspect: "/lk/minimax_h3/bundle/inspect",
+    restoreRefs: "/lk/minimax_h3/bundle/restore_refs",
+    recent: "/lk/minimax_h3/bundle/recent",
+};
+
+function _bundleModal(titleText) {
+    ensureRefmodPickerStyle();
+    const overlay = make("div"); overlay.className = "ghh3-refmod-overlay";
+    const dialog = make("div"); dialog.className = "ghh3-refmod-dialog";
+    const head = make("div"); head.className = "ghh3-refmod-head";
+    const title = make("div", {}, titleText); title.className = "ghh3-refmod-title";
+    const close = make("button", {}, "×"); close.className = "ghh3-refmod-close";
+    head.append(title, close);
+    const body = make("div"); body.className = "ghh3-refmod-list"; body.style.minHeight = "80px";
+    const status = make("div"); status.className = "ghh3-refmod-status";
+    dialog.append(head, status, body);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    const previousFocus = document.activeElement;
+    const dismiss = () => {
+        overlay.remove();
+        document.removeEventListener("keydown", onKey, true);
+        previousFocus?.focus?.({ preventScroll: true });
+    };
+    const onKey = event => { if (event.key === "Escape") { event.stopPropagation(); dismiss(); } };
+    close.onclick = dismiss;
+    overlay.onpointerdown = event => { if (event.target === overlay) dismiss(); };
+    document.addEventListener("keydown", onKey, true);
+    return { overlay, dialog, body, status, dismiss };
+}
+
+function _slotToInputName(slot) {
+    const m = /^shot(\d+)_(first_frame|last_frame|img(\d+)|vid(\d+)|aud(\d+))$/.exec(slot || "");
+    if (!m) return null;
+    const n = m[1];
+    if (m[2] === "img") return { shot: n, input: `ref_image_${m[3]}` };
+    if (m[2] === "vid") return { shot: n, input: `ref_video_${m[4]}` };
+    if (m[2] === "aud") return { shot: n, input: `ref_audio_${m[5]}` };
+    return { shot: n, input: m[2] };
+}
+
+// 束参考 → 画布上的原始上传文件名（LoadImage/LoadVideo 等 widget 值），
+// 供回填时按原名拷回 input 目录。
+function resolveRefTargets(refs) {
+    const graph = app.graph;
+    const composer = (graph?._nodes || []).find(node => node.type === "LKH3Composer");
+    const targets = [];
+    if (!composer) return targets;
+    const seen = new Set();
+    for (const ref of refs || []) {
+        for (const slot of ref.slots || []) {
+            const mapped = _slotToInputName(slot);
+            if (!mapped) continue;
+            const composerInput = (composer.inputs || []).find(inp => inp.name === `shot_${mapped.shot}`);
+            const composerLink = composerInput ? graph.links[composerInput.link] : null;
+            const shotNode = composerLink ? graph.getNodeById(composerLink.origin_id) : null;
+            const shotInput = shotNode?.inputs?.find(inp => inp.name === mapped.input);
+            const shotLink = shotInput ? graph.links[shotInput.link] : null;
+            const srcNode = shotLink ? graph.getNodeById(shotLink.origin_id) : null;
+            const widget = (srcNode?.widgets || []).find(w => typeof w.value === "string" && w.value);
+            const target = widget?.value;
+            if (typeof target === "string" && target && !seen.has(ref.file + "|" + target)) {
+                seen.add(ref.file + "|" + target);
+                targets.push({ file: ref.file, target, slot });
+            }
+        }
+    }
+    return targets;
+}
+
+function showBundleSummary(data) {
+    const modal = _bundleModal(`项目束 · ${data.film_key || ""}`);
+    modal.status.textContent = data.path || "";
+    const manifest = data.manifest || {};
+    const identity = manifest.identity || {};
+    const refs = data.refs || [];
+    const block = (html) => {
+        const div = make("div");
+        div.style.cssText = "font-size:11px;line-height:1.6;white-space:pre-wrap;color:#d7e3ec";
+        div.innerHTML = html;
+        modal.body.appendChild(div);
+    };
+    const firstEntries = Object.keys(manifest.first || {});
+    const secondEntries = Object.keys(manifest.second || {});
+    block([
+        `画布 ${identity.width}×${identity.height} · ${identity.segment_count} 镜`,
+        `一跑缓存：${firstEntries.length ? firstEntries.length + " 段已入束" : "空"} · 二跑缓存：${secondEntries.length ? secondEntries.length + " 段已入束" : "空"}`,
+        "",
+        "参考媒体：",
+    ].join("\n"));
+    const missing = refs.filter(ref => ref.status !== "ok");
+    if (!refs.length) block("（无）");
+    for (const ref of refs) {
+        const color = ref.status === "ok" ? "#7fd39a" : ref.status === "missing" ? "#e2a15c" : "#e27d5c";
+        const label = ref.status === "ok" ? "✓ 就绪" : ref.status === "missing" ? "缺（input 目录）" : "已变更";
+        const row = make("div");
+        row.style.cssText = "font-size:11px;color:#d7e3ec;padding:2px 0";
+        row.innerHTML = `<span style="color:${color}">${label}</span> ${ref.file} <span style="color:#8298a9">[${(ref.slots || []).join(", ")}]</span>`;
+        modal.body.appendChild(row);
+    }
+    const actions = make("div");
+    actions.style.cssText = "display:flex;gap:8px;margin-top:10px";
+    if (missing.length) {
+        const backfill = make("button", {}, "回填缺失参考");
+        backfill.className = "ghh3-refmod-refresh";
+        backfill.onclick = async () => {
+            const targets = resolveRefTargets(missing);
+            if (!targets.length) {
+                modal.status.textContent = "无法从画布解析原始上传文件名（参考可能来自上游节点链，请手动重选）";
+                return;
+            }
+            backfill.disabled = true;
+            const response = await api.fetchApi(BUNDLE_ROUTES.restoreRefs, {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ path: data.path, jobs: targets }),
+            });
+            const result = await response.json().catch(() => ({}));
+            const ok = (result.results || []).filter(item => item.status === "restored").length;
+            backfill.disabled = false;
+            modal.status.textContent = `回填完成 ${ok}/${targets.length}（hash 校验通过）`;
+            for (const item of result.results || []) {
+                for (const ref of refs) {
+                    if (ref.file === item.file && item.status === "restored") ref.status = "ok";
+                }
+            }
+            backfill.remove();
+        };
+        actions.appendChild(backfill);
+    }
+    const done = make("button", {}, "完成");
+    done.className = "ghh3-refmod-refresh";
+    done.onclick = modal.dismiss;
+    actions.appendChild(done);
+    modal.body.appendChild(actions);
+}
+
+async function openBundleLoader() {
+    const modal = _bundleModal("接回项目（打开项目束）");
+    const input = document.createElement("input");
+    input.className = "ghh3-refmod-search";
+    input.type = "text";
+    input.placeholder = "粘贴项目束文件夹路径，例如 F:\\…\\output\\LK_H3_projects\\a3f9c2d1";
+    modal.body.appendChild(input);
+    const submit = make("button", {}, "接回（恢复工作流）");
+    submit.className = "ghh3-refmod-refresh";
+    submit.style.marginBottom = "8px";
+    modal.body.appendChild(submit);
+    const recentTitle = make("div", {}, "最近项目：");
+    recentTitle.style.cssText = "color:#8298a9;font-size:10px;margin:6px 0 2px";
+    modal.body.appendChild(recentTitle);
+    const recentList = make("div"); recentList.className = "ghh3-refmod-list";
+    modal.body.appendChild(recentList);
+
+    const load = async () => {
+        recentList.replaceChildren();
+        try {
+            const response = await api.fetchApi(`${BUNDLE_ROUTES.recent}?t=${Date.now()}`, { cache: "no-store" });
+            const data = response.ok ? await response.json() : {};
+            for (const entry of data.recent || []) {
+                if (!entry.path) continue;
+                const row = make("button"); row.className = "ghh3-refmod-row"; row.type = "button";
+                const name = make("span", {}, entry.path); name.className = "ghh3-refmod-name";
+                const meta = make("span", {}, entry.updated || ""); meta.className = "ghh3-refmod-meta";
+                row.append(name, meta);
+                row.onclick = () => { input.value = entry.path; submit.click(); };
+                recentList.appendChild(row);
+            }
+            if (!recentList.firstChild) recentList.textContent = "（暂无记录）";
+        } catch (error) {
+            recentList.textContent = "读取失败";
+        }
+    };
+
+    submit.onclick = async () => {
+        const path = input.value.trim().replace(/^"(.*)"$/, "$1");
+        if (!path) { modal.status.textContent = "请填写项目束路径"; return; }
+        modal.status.textContent = "读取中…";
+        try {
+            const response = await api.fetchApi(BUNDLE_ROUTES.inspect, {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ path }),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) { modal.status.textContent = data.error || "读取失败"; return; }
+            if (!data.workflow) {
+                modal.status.textContent = "该束没有 workflow.json 快照——需用 AV落盘解码 跑过一次后才有；可手动打开原工作流继续";
+                return;
+            }
+            modal.dismiss();
+            await app.loadGraphData(JSON.parse(data.workflow));
+            showBundleSummary(data);
+        } catch (error) {
+            modal.status.textContent = `接回失败：${error}`;
+        }
+    };
+    input.addEventListener("keydown", event => { if (event.key === "Enter") submit.click(); });
+    input.focus();
+    load();
+}
+
 // ── shared drawing helpers for the canvas chips widget ─────────────────────
 function roundRectPath(ctx, x, y, w, h, r) {
     const radius = Math.max(0, Math.min(r, w / 2, h / 2));
@@ -1678,6 +1883,7 @@ function createShotPanel(node) {
                 if (parsed && Array.isArray(parsed.loras) && Array.isArray(parsed.mods)) {
                     loras = parsed.loras;
                     mods = parsed.mods;
+                    audioMode = typeof parsed.audio_mode === "string" ? parsed.audio_mode : "";
                     return true;
                 }
             } catch {}
@@ -1685,6 +1891,7 @@ function createShotPanel(node) {
         if (!strict) {
             loras = [];
             mods = [];
+            audioMode = "";
         }
         return false;
     }
@@ -1693,7 +1900,7 @@ function createShotPanel(node) {
         // widget value arrives asynchronously and an early write would clobber
         // it with the pre-restore (empty) state.
         if (restoring) return;
-        const value = JSON.stringify({ loras, mods });
+        const value = JSON.stringify({ loras, mods, audio_mode: audioMode });
         if (shotJsonW && shotJsonW.value !== value) shotJsonW.value = value;
         node.properties[stateKey] = value;
     }
@@ -1774,6 +1981,19 @@ function createShotPanel(node) {
 
     function rebuildRows() {
         clearPanelWidgets();
+        // ── per-shot audio mode (empty = follow the composer's global mode) ──
+        const AUDIO_MODES = [
+            ["", "跟随编排"],
+            ["lock_source", "锁定原声"],
+            ["reference_only", "仅参考"],
+            ["native", "原生生成"],
+        ];
+        const audioLabel = (key) => (AUDIO_MODES.find(m => m[0] === key) || AUDIO_MODES[0])[1];
+        addRow("combo", "音频模式", audioLabel(audioMode), v => {
+            if (restoring) return;
+            audioMode = (AUDIO_MODES.find(m => m[1] === v) || AUDIO_MODES[0])[0];
+            scheduleSync();
+        }, { values: AUDIO_MODES.map(m => m[1]) });
         const loraNames = loras_fetched || [];
         loras.forEach((entry, i) => {
             const values = ["None", ...loraNames];
@@ -2072,6 +2292,18 @@ app.registerExtension({
             nodeType.prototype.onNodeCreated = function() {
                 const result = previousShot?.apply(this, arguments);
                 if (!this._ghH3PanelReady && createShotPanel(this)) this._ghH3PanelReady = true;
+                return result;
+            };
+            return;
+        }
+        if (nodeData.name === "LKH3Composer") {
+            const previousComposer = nodeType.prototype.onNodeCreated;
+            nodeType.prototype.onNodeCreated = function() {
+                const result = previousComposer?.apply(this, arguments);
+                if (!this._ghh3BundleButton) {
+                    const button = this.addWidget("button", "接回项目", null, () => openBundleLoader());
+                    if (button) { button.serialize = false; this._ghh3BundleButton = button; }
+                }
                 return result;
             };
             return;
