@@ -935,6 +935,16 @@ def _sample_bundle(model, bundle, *, steps, shift_video, shift_audio,
         sigmas = external_sigmas
     else:
         sigmas = default_sigmas
+    if logging.getLogger().isEnabledFor(logging.INFO):
+        # Schedule visibility: vendor-distilled LoRAs only follow conditioning
+        # on their own sigma trajectory - a silently swapped schedule (e.g.
+        # ManualSigmas not reaching SCA) looks exactly like "the model ignored
+        # the reference image".  Log every schedule actually used.
+        try:
+            _sig = [round(float(s), 4) for s in sigmas.detach().cpu().flatten().tolist()]
+            logging.info("[LKH3] 采样调度: %d 步 σ=%s", len(_sig) - 1, _sig)
+        except Exception:
+            pass
     guider = _make_guider(patched_model, bundle["positive"], cfg)
     samples = av_latent["samples"]
     if external_noise_tensor is not None:
