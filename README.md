@@ -5,6 +5,12 @@
 > T8 式两跑高清化：分段引导一采（T8 原语分解）→ 潜空间放大 → 二跑分段精修，
 > 全程打包 AV 潜空间（视频+音频联合生成、联合解码）。
 
+**English intro:** Segmented multi-shot **audio+video** generation for the MiniMax H3
+hybrid Ref2VA model. One-stop film composer (whole-film prompt + per-shot LoRA/RefMod
+panels) → segmented first pass → packed AV-latent upscale → per-shot second-pass
+refine → joint audio-video decode. 7 nodes; reference-photo identity sheets
+(YuNet face crops) for character consistency. Full docs below are in Chinese.
+
 ## 节点总览（7 个）
 
 | 节点 | 显示名 | 角色 |
@@ -88,9 +94,36 @@ LKH3Shot ×1-8 ─shot─▶ LKH3Composer ─segments────────▶
 
 ## 安装
 
-放入 `ComfyUI/custom_nodes/`，重启 ComfyUI。硬依赖见 `requirements.txt`
-（torch/safetensors/numpy/Pillow/sentencepiece/transformers≥4.49/accelerate/imageio-ffmpeg）；
-**参考聚焦**需要 `opencv-python`（YuNet 检测器），RefMod 视频加载器可选装 opencv 或 imageio。
+### 方式一：ComfyUI Manager（推荐）
+
+Manager → **Custom Nodes Manager** → **Install via Git URL**，粘贴：
+
+```
+https://github.com/nohave1688-k/comfyui-minmaxh3-lk
+```
+
+Manager 会克隆仓库并自动安装 `requirements.txt` 中的依赖。
+
+### 方式二：手动 git clone
+
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/nohave1688-k/comfyui-minmaxh3-lk.git
+```
+
+重启 ComfyUI。如需手动补依赖：
+
+```bash
+pip install -r ComfyUI/custom_nodes/comfyui-minmaxh3-lk/requirements.txt
+```
+
+### 依赖说明
+
+- 硬依赖（`requirements.txt`，Manager 自动安装）：safetensors / numpy / Pillow /
+  sentencepiece / transformers≥4.49 / accelerate / imageio-ffmpeg≥0.6.0（torch 由 ComfyUI 提供）
+- **参考聚焦**节点需要 `opencv-python`（YuNet 人脸检测器）；RefMod 视频加载器可选装
+  opencv 或 imageio 之一
+- 需要 MiniMax H3（Ref2VA 混合）模型文件放置于 ComfyUI 常规模型目录
 
 ## 结构
 
@@ -116,3 +149,17 @@ models/        face_detection_yunet_2023mar.onnx（参考聚焦内置检测器�
 - 采样语义改动先读 `gh/long_video.py` 的 `run_long_video` / `run_refine_segments`
   与 `gh/sampling.py` 的双时钟实现；二跑调度的 T8 对齐依据写在节点 tooltip 与
   `run_refine_segments` docstring 里
+
+## 致谢 / Credits
+
+- [OpenCV Zoo — YuNet](https://github.com/opencv/opencv_zoo)：
+  `models/face_detection_yunet_2023mar.onnx` 人脸检测模型（Apache-2.0），
+  供 `LKH3ReferenceFocus` 内置使用，随包分发以便开箱即用
+- 前身包 ComfyUI-MiniMaxH3-lanxi 的分段计划契约（`LANXI_H3_SEGMENTS`）与
+  RefMod 库路径在本包延续
+- 两跑高清化精修配方对齐 T8 发布参数（simple 调度、入口去噪 0.30）
+
+## 许可证 / License
+
+[MIT](LICENSE)。内置的 YuNet 检测器模型遵循其原始 Apache-2.0 许可证
+（[OpenCV Zoo](https://github.com/opencv/opencv_zoo)）。
