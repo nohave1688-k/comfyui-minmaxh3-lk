@@ -111,7 +111,12 @@ n47["widgets_values_named"] = {
 }
 
 n115 = nodes[115]
-n115["widgets_values"] = [12, 3, 9, 6, "lcm", "keep", True, True, "anchor", 1.0, 0.30, UPSCALE_MODEL, 1.5]
+# widgets_values order MUST follow the SERVED input_order (required widgets
+# first, then optional ones): shift/shift/base/coarse/sampler/audio_policy/
+# release/free/carry_source, upscale_model, upscale_scale, then the OPTIONAL
+# context_noise and refine_entry_sigma.  Declaration order would mis-align
+# every value by one slot here.
+n115["widgets_values"] = [12, 3, 9, 6, "lcm", "keep", True, True, "anchor", UPSCALE_MODEL, 1.5, 1.0, 0.30]
 n115["widgets_values_named"] = {
     "shift_video": 12, "shift_audio": 3, "base_steps": 9, "coarse_steps": 6,
     "sampler_name": "lcm", "audio_policy": "keep",
