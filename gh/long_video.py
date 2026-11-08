@@ -1441,7 +1441,9 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
     # straight back — indistinguishable from the input while still paying for
     # model loading, CLIP conditioning and per-shot sampling.  Skip all of it
     # and hand the (layout-corrected) upscaled latent through unchanged.
-    if float(refine_entry_sigma) <= 0.05:
+    # Never triggers when external sigmas are wired - a user-owned schedule
+    # (e.g. a T8 ParityPlan tail) must run even at a tiny widget denoise.
+    if external_sigmas is None and float(refine_entry_sigma) <= 0.05:
         out = {
             "samples": refined_latent["samples"],
             "gh_h3_audio_mode": refined_latent.get("gh_h3_audio_mode")
