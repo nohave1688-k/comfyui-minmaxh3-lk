@@ -526,8 +526,9 @@ async function openBundleLoader() {
                 modal.status.textContent = "该束没有 workflow.json 快照——需用 AV落盘解码 跑过一次后才有；可手动打开原工作流继续";
                 return;
             }
-            modal.dismiss();
             await app.loadGraphData(JSON.parse(data.workflow));
+            // 只有恢复成功才关弹窗——恢复抛错时错误要留在这里可见。
+            modal.dismiss();
             showBundleSummary(data);
         } catch (error) {
             modal.status.textContent = `接回失败：${error}`;
@@ -1883,7 +1884,8 @@ function createShotPanel(node) {
                 if (parsed && Array.isArray(parsed.loras) && Array.isArray(parsed.mods)) {
                     loras = parsed.loras;
                     mods = parsed.mods;
-                    audioMode = typeof parsed.audio_mode === "string" ? parsed.audio_mode : "";
+                    audioMode = typeof parsed.audio_mode === "string"
+                        ? parsed.audio_mode.trim().toLowerCase() : "";
                     return true;
                 }
             } catch {}
