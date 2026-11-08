@@ -1356,13 +1356,91 @@ class MiniMaxH3SegmentGuiderGH(io.ComfyNode):
 
 
 
+_LATENT_UPSCALER_CACHE = {}
+
+
+def _load_latent_upscaler(model_name):
+    """Load an official MiniMax H3 latent upscaler from the comfy-core
+    ``latent_upscale_models`` folder (same detection logic as comfy's own
+    loader).  Cached by name - weights stay on the patcher across runs."""
+    cache = _LATENT_UPSCALER_CACHE.get(os.path.normcase(model_name))
+    if cache is not None:
+        return cache
+    import comfy.model_management as model_management
+    import comfy.ops
+    from comfy.ldm.minimax.latent_upscaler import MiniMaxH3LatentUpscaler
+
+    path = folder_paths.get_full_path_or_raise("latent_upscale_models", model_name)
+    sd, _meta = comfy.utils.load_torch_file(path, safe_load=True, return_metadata=True)
+    model = MiniMaxH3LatentUpscaler(
+        in_channels=sd["conv_in.weight"].shape[1],
+        channels=sd["conv_in.weight"].shape[0],
+        in_blocks=len({k.split(".")[1] for k in sd if k.startswith("in_blocks.") and ".in_layers." in k}),
+        out_blocks=len({k.split(".")[1] for k in sd if k.startswith("out_blocks.") and ".in_layers." in k}),
+        temporal_kernel=sd["in_blocks.1.dwconv.weight"].shape[2],
+        dtype=model_management.vae_dtype(allowed_dtypes=[torch.float16, torch.bfloat16, torch.float32]),
+        operations=comfy.ops.disable_weight_init,
+    )
+    model_management.archive_model_dtypes(model)
+    patcher = comfy.model_patcher.CoreModelPatcher(
+        model,
+        load_device=model_management.get_torch_device(),
+        offload_device=model_management.unet_offload_device(),
+    )
+    model.load_state_dict(sd, assign=patcher.is_dynamic())
+    _LATENT_UPSCALER_CACHE[os.path.normcase(model_name)] = patcher
+    return patcher
+
+
+def _learned_upscale_film(refined_latent, model_name, scale_by):
+    """Spatially upscale the whole-film AV latent with the learned model.
+
+    Spatial-only by design: token count (time) is untouched, so every
+    ``lk_layout`` offset/span stays exactly valid - the layout drift class the
+    external T8 upscaler introduced cannot happen here.  Audio passes through
+    unchanged; the noise_mask (locked first-pass heads) is dropped because the
+    refine builds its own masks per window.
+    """
+    patcher = _load_latent_upscaler(model_name)
+    import comfy.model_management as model_management
+
+    video, audio = nested_av_parts(refined_latent)
+    t = int(video.shape[2])
+    h, w = int(video.shape[3]), int(video.shape[4])
+    pw = max(16, round(w * scale_by / 16) * 16)
+    ph = max(16, round(h * scale_by / 16) * 16)
+    if (pw, ph) == (w, h):
+        return refined_latent
+    size = (t, ph // 16, pw // 16)
+    model_management.load_models_gpu(
+        [patcher], memory_required=patcher.model.memory_required(video.shape, size)
+    )
+    upscaled = patcher.model(
+        video.to(device=patcher.load_device, dtype=patcher.model_dtype()), size
+    )
+    upscaled = upscaled.to(device=model_management.intermediate_device(), dtype=video.dtype)
+    out = dict(refined_latent)
+    out["samples"] = comfy.nested_tensor.NestedTensor((upscaled, audio))
+    out.pop("noise_mask", None)
+    layout = dict(out.get("lk_layout") or {})
+    if layout:
+        layout["video_hw"] = [ph, pw]
+        out["lk_layout"] = layout
+    logging.info(
+        "[LKH3] 内部学习型放大: %dx%d -> %dx%d (x%.2f, %s)",
+        w, h, pw, ph, scale_by, model_name,
+    )
+    return out
+
+
 def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_steps,
                         shift_video, shift_audio, sampler_name, scheduler, seed,
                         seed_policy, cfg, release_clip, free_between_segments,
                         audio_policy="keep", clip=None, video_vae=None,
                         audio_vae=None, external_sigmas=None, external_noise=None,
                         external_sampler=None, carry_source="anchor",
-                        context_noise=0.15, refine_entry_sigma=0.30):
+                        context_noise=0.15, refine_entry_sigma=0.30,
+                        upscale_model="", upscale_scale=1.0):
     """Segmented HD second pass: refine an upscaled whole-film AV latent one
     shot at a time.
 
@@ -1436,6 +1514,15 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
                 [e["video_tokens"] for e in rebuilt],
             )
             entries = rebuilt
+
+    # Internal learned upscale (comfy's official MiniMax H3 upscaler model):
+    # spatial-only, so lk_layout time spans stay exactly valid and the healing
+    # above remains a no-op.  Runs before the width/height derivation so
+    # per-shot conditioning re-encodes at the HD canvas, and before the
+    # identity shortcut so even identity runs hand through an upscaled film.
+    if float(upscale_scale) > 1.001 and upscale_model:
+        refined_latent = _learned_upscale_film(refined_latent, upscale_model, float(upscale_scale))
+        video, audio = nested_av_parts(refined_latent)
 
     # Identity shortcut: at denoise <= 0.05 the refine re-noises ~5% and steps
     # straight back — indistinguishable from the input while still paying for
@@ -1838,6 +1925,16 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
                     optional=True,
                     tooltip="精修去噪强度（denoise）。T8 发布配方：simple 调度、3 步、denoise 0.30（上限 0.40）——二采是轻度 img2img 润色而不是重生成，0.94 入口的重生成正是网格斑/颜色漂移的来源。噪声来自全片共享的全局噪声场按位置切片，邻镜重建相互关联。",
                 ),
+                io.Combo.Input(
+                    "upscale_model",
+                    options=folder_paths.get_filename_list("latent_upscale_models"),
+                    default=(folder_paths.get_filename_list("latent_upscale_models") or [""])[0],
+                    tooltip="内部学习型放大模型（comfy 官方 latent_upscale_models 目录）。配合放大倍率 >1 使用：本节点先把一采潜空间放大到目标分辨率，再逐镜精修。",
+                ),
+                io.Float.Input(
+                    "upscale_scale", default=1.0, min=1.0, max=4.0, step=0.05,
+                    tooltip="内部放大倍率。1.0 = 不放大（此时 av_latent 输入须为已放大潜空间——兼容旧工作流）；>1 = 先把一采潜空间按该倍率学习型放大（官方 H3 上采样模型，音频原样保留、时间跨度不动），再逐镜精修。",
+                ),
                 io.Custom(RUNTIME_TYPE).Input(
                     "runtime", optional=True, display_name="解码设置",
                     tooltip="CLIP + 视频/音频 VAE 捆绑 — 从 长视频编排 的 解码设置 连一根线即可。未连接时按模型设置名字加载。",
@@ -1869,6 +1966,7 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
                 release_clip=True, free_between_segments=True,
                 carry_source="anchor", context_noise=0.15,
                 refine_entry_sigma=0.30,
+                upscale_model="", upscale_scale=1.0,
                 runtime=None, noise=None):
         clip, video_vae, audio_vae = runtime_parts(runtime)
         return io.NodeOutput(*run_refine_segments(
@@ -1880,6 +1978,7 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
             release_clip=release_clip, free_between_segments=free_between_segments,
             audio_policy=audio_policy, carry_source=carry_source,
             context_noise=context_noise, refine_entry_sigma=refine_entry_sigma,
+            upscale_model=upscale_model, upscale_scale=upscale_scale,
             clip=clip, video_vae=video_vae, audio_vae=audio_vae,
             external_sigmas=None, external_noise=noise, external_sampler=None,
         ))

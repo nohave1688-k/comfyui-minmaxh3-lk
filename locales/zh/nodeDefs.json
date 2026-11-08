@@ -244,6 +244,14 @@
       "sampler_name": {
         "name": "二采采样器",
         "tooltip": "二采采样器。lcm/标准名 = comfy 原生 FLOW_AV 路由（与一采 pika 官方路由对齐）；dual_clock_euler = 兼容路由。"
+      },
+      "upscale_model": {
+        "name": "放大模型",
+        "tooltip": "内部学习型放大模型（comfy 官方 latent_upscale_models 目录）。配合放大倍率 >1 使用。"
+      },
+      "upscale_scale": {
+        "name": "放大倍率",
+        "tooltip": "1.0 = 不放大（输入须为已放大潜空间）；>1 = 先学习型放大再逐镜精修。"
       }
     },
     "outputs": {

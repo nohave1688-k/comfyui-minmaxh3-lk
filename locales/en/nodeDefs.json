@@ -239,6 +239,14 @@
       "sampler_name": {
         "name": "二采采样器",
         "tooltip": "Refine sampler. lcm/standard names = comfy native FLOW_AV route (aligned with the pass-1 pika official route); dual_clock_euler = compatibility route."
+      },
+      "upscale_model": {
+        "name": "放大模型",
+        "tooltip": "Internal learned upscale model (comfy official latent_upscale_models folder); used with scale > 1."
+      },
+      "upscale_scale": {
+        "name": "放大倍率",
+        "tooltip": "1.0 = no upscale (input must already be upscaled); >1 = learned upscale inside the node before per-shot refine."
       }
     },
     "outputs": {
