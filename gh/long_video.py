@@ -1273,8 +1273,11 @@ class MiniMaxH3SegmentGuiderGH(io.ComfyNode):
                 io.Float.Input("shift_video", default=12.0, min=0.01, max=100.0, step=0.01),
                 io.Float.Input("shift_audio", default=3.0, min=0.01, max=100.0, step=0.01),
                 io.Combo.Input("sampler_name", options=SAMPLER_OPTIONS, default=DEFAULT_SAMPLER_NAME,
-                               tooltip="dual_clock_euler = 内置双钟欧拉；选标准采样器名则切 FLOW_AV 补丁。"),
-                io.Combo.Input("scheduler", options=SCHEDULER_OPTIONS, default=DEFAULT_SCHEDULER_NAME),
+                               tooltip="dual_clock_euler = 内置双钟欧拉；选标准采样器名（如 lcm）则切 comfy 原生 FLOW_AV 采样 —— Pika Flex 官方路由用 lcm + pika_flex。"),
+                io.Combo.Input(
+                    "scheduler", options=SCHEDULER_OPTIONS, default=DEFAULT_SCHEDULER_NAME,
+                    tooltip="native_flow = 双钟默认调度；pika_flex = Pika Flex 官方专用 6 步 Sigma（恒定值，步数控件被忽略）—— 与 pika LoRA + lcm 采样器配套，即官方 REF2V 配方。",
+                ),
                 io.Combo.Input("seed_policy", options=["increment", "fixed"], default="fixed",
                                tooltip="increment = 每镜种子+1；fixed = 全部镜头同一种子。基础种子来自 SamplerCustomAdvanced 的噪声原语（RandomNoise 的种子）。"),
                 io.Float.Input("context_noise", default=0.0, min=0.0, max=1.0, step=0.05,
@@ -1805,7 +1808,11 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
                 io.Int.Input("base_steps", default=9, min=2, max=1000,
                              tooltip="完整基础调度的步数（对应 T8 ParityPlan 的 base）。精修步数 = base - coarse。"),
                 io.Int.Input("coarse_steps", default=4, min=1, max=1000,
-                             tooltip="粗采 cutoff：基础调度从第 N 个 σ 起进入精修段（对应 T8 ParityPlan 的 coarse）。"),
+                             tooltip="粗采 cutoff：基础调度从第 N 个 σ 起进入精修段（对应 T8 ParityPlan 的 coarse）。精修步数 = base - coarse。"),
+                io.Combo.Input(
+                    "sampler_name", options=SAMPLER_OPTIONS, default=DEFAULT_SAMPLER_NAME,
+                    tooltip="二采采样器。lcm/标准名 = comfy 原生 FLOW_AV 路由（与一采 pika 官方路由对齐）；dual_clock_euler = 兼容路由。",
+                ),
                 io.Combo.Input(
                     "audio_policy", options=["keep", "regenerate"], default="keep",
                     tooltip="keep = 二跑完全保留一采生成的音频（等价 T8 的 legacy_policy）；regenerate = 音频随视频一起精修。",
@@ -1848,7 +1855,7 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
 
     @classmethod
     def execute(cls, av_latent, segments, model, shift_video, shift_audio,
-                base_steps, coarse_steps, audio_policy,
+                base_steps, coarse_steps, sampler_name, audio_policy,
                 release_clip=True, free_between_segments=True,
                 carry_source="anchor", context_noise=0.15,
                 refine_entry_sigma=0.30,
@@ -1858,7 +1865,7 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
             model, segments, av_latent,
             base_steps=base_steps, coarse_steps=coarse_steps,
             shift_video=shift_video, shift_audio=shift_audio,
-            sampler_name=DEFAULT_SAMPLER_NAME, scheduler=DEFAULT_SCHEDULER_NAME,
+            sampler_name=sampler_name, scheduler=DEFAULT_SCHEDULER_NAME,
             seed=0, seed_policy="fixed", cfg=1.0,
             release_clip=release_clip, free_between_segments=free_between_segments,
             audio_policy=audio_policy, carry_source=carry_source,

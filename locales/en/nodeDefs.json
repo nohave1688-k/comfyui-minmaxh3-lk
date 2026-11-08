@@ -156,7 +156,11 @@
         "name": "sampler"
       },
       "scheduler": {
-        "name": "scheduler"
+        "name": "scheduler",
+        "options": {
+          "native_flow": "Dual-clock default (shift12/3)",
+          "pika_flex": "Pika Flex official 6-step sigmas"
+        }
       }
     },
     "outputs": {
@@ -232,6 +236,10 @@
       },
       "coarse_steps": {
         "name": "coarse_steps"
+      },
+      "sampler_name": {
+        "name": "二采采样器",
+        "tooltip": "Refine sampler. lcm/standard names = comfy native FLOW_AV route (aligned with the pass-1 pika official route); dual_clock_euler = compatibility route."
       }
     },
     "outputs": {

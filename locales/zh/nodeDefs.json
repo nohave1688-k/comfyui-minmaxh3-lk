@@ -158,7 +158,11 @@
         "tooltip": "dual_clock_euler = 内置双钟欧拉；选标准采样器名则切 FLOW_AV 补丁。"
       },
       "scheduler": {
-        "name": "调度器"
+        "name": "调度器",
+        "options": {
+          "native_flow": "双钟默认（shift12/3）",
+          "pika_flex": "Pika Flex 官方 6 步 Sigma"
+        }
       }
     },
     "outputs": {
@@ -237,6 +241,10 @@
       "coarse_steps": {
         "name": "粗采步数",
         "tooltip": "粗采 cutoff：基础调度从第 N 个 σ 起进入精修段（对应 T8 ParityPlan 的 coarse）。"
+      },
+      "sampler_name": {
+        "name": "二采采样器",
+        "tooltip": "二采采样器。lcm/标准名 = comfy 原生 FLOW_AV 路由（与一采 pika 官方路由对齐）；dual_clock_euler = 兼容路由。"
       }
     },
     "outputs": {

@@ -25,8 +25,13 @@ if hasattr(comfy.model_sampling, "ModelSamplingAV"):
     SAMPLER_OPTIONS.extend(
         name for name in comfy.samplers.SAMPLER_NAMES if name != DEFAULT_SAMPLER_NAME
     )
+# Pika H3 Flex's published schedule (official REF2V template, ManualSigmas):
+# exactly 6 steps, fixed values - the steps widget is ignored when selected.
+PIKA_FLEX_SCHEDULER = "pika_flex"
+PIKA_FLEX_SIGMAS = [1.0, 0.972973, 0.923077, 0.8, 0.571429, 0.333333, 0.0]
 SCHEDULER_OPTIONS = [
     DEFAULT_SCHEDULER_NAME,
+    PIKA_FLEX_SCHEDULER,
     *(name for name in comfy.samplers.SCHEDULER_NAMES if name != DEFAULT_SCHEDULER_NAME),
 ]
 
@@ -146,6 +151,8 @@ def native_flow_sigmas(steps: int, shift_video: float) -> torch.Tensor:
 
 
 def _scheduler_sigmas(model_sampling, scheduler: str, steps: int, shift_video: float):
+    if scheduler == PIKA_FLEX_SCHEDULER:
+        return torch.tensor(PIKA_FLEX_SIGMAS, dtype=torch.float32)
     if scheduler == DEFAULT_SCHEDULER_NAME:
         return native_flow_sigmas(steps, shift_video)
     if scheduler not in comfy.samplers.SCHEDULER_NAMES:
