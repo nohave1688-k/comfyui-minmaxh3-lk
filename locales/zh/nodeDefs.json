@@ -224,7 +224,8 @@
         "name": "续接头重加噪"
       },
       "refine_entry_sigma": {
-        "name": "精修去噪强度 (denoise)"
+        "name": "精修去噪强度 (denoise)",
+        "tooltip": "精修入口 σ（绝对值，精确生效）：调度从该 σ 线性降到 0。0.30 恰落在 pika 官方网格的低噪区（~0.333），是蒸馏/加速 LoRA 窗口内的轻度润色。"
       },
       "runtime": {
         "name": "解码设置",

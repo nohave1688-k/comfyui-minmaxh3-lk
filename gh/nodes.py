@@ -428,6 +428,11 @@ def _collect_connected_media(conn_media):
 
 
 class MiniMaxH3ComposerGH(io.ComfyNode):
+    # The composer bakes the loaded CLIP/VAE objects and the shot plan into
+    # its outputs; downstream conditioning embeds those objects.  Re-execute
+    # every queue (lanxi semantics) so the conditioning chain can never ride
+    # a stale cached bundle across runs.
+    NOT_IDEMPOTENT = True
     """One-stop film composer: whole-film prompt + model selection + shot
     collection + the empty-AV template, merged into a single node.
 

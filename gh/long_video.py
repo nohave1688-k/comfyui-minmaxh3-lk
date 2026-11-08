@@ -1030,37 +1030,51 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
     audio_mode = None
     first_positive = None
 
-    # Pre-build every shot's conditioning with ONE text-encoder load.  Shot
-    # continuation is carried in latent space (never as a conditioning image),
-    # so bundles cannot depend on each other's sampling results: encoding the
-    # whole range up front removes the per-shot CLIP unload/reload cycle that
-    # used to sit between consecutive shots.  ``release_clip`` now means:
-    # release once after the build phase, before the first shot samples.
+    # Conditioning builds are LAZY by default (the pre-4fe6157 behavior):
+    # each shot builds right before it samples, with the CLIP unload/reload
+    # cycle between shots.  The hoisted pre-build (LK_PREBUILD=1) encodes the
+    # whole range back-to-back with one text-encoder load — faster, but it
+    # changed the encoder-call pattern relative to every reference-good run,
+    # and a reference-adherence regression appeared the same day it shipped.
+    # Continuation is carried in latent space (never as a conditioning image),
+    # so lazy builds stay semantically correct either way.
+    import os
+    prebuild = os.environ.get("LK_PREBUILD") == "1"
     bundles = {}
-    for index in range(start, end + 1):
-        if preview.get("index") == index and preview.get("bundle") is not None:
-            bundles[index] = preview["bundle"]
-        elif index == start and prebuilt_bundle is not None:
-            bundles[index] = prebuilt_bundle
-        else:
-            if clip is None:
-                clip = _load_clip(plan)
-            # No automatic previous-tail keyframe: continuation is carried in
-            # latent space below, not as a first-frame conditioning image.
-            bundles[index] = build_segment_bundle(
-                plan, index, first_frame_override=None, clip=clip,
-                connected=(plan.get("connected_by_segment") or {}).get(index + 1),
-            )
-    # The conditioning output for downstream sampler chains: the first
-    # executed shot's positive bundle (prompt + reference encoding).
-    first_positive = bundles[start]["positive"]
-    if release_clip and clip is not None:
-        _release_clip(plan, clip)
-        clip = None
+    first_positive = None
 
     for index in range(start, end + 1):
         segment = plan["segments"][index]
-        bundle = bundles[index]
+        bundle = bundles.get(index)
+        if bundle is None:
+            if preview.get("index") == index and preview.get("bundle") is not None:
+                bundle = preview["bundle"]
+            elif index == start and prebuilt_bundle is not None:
+                bundle = prebuilt_bundle
+            else:
+                if clip is None:
+                    clip = _load_clip(plan)
+                # No automatic previous-tail keyframe: continuation is carried in
+                # latent space below, not as a first-frame conditioning image.
+                bundle = build_segment_bundle(
+                    plan, index, first_frame_override=None, clip=clip,
+                    connected=(plan.get("connected_by_segment") or {}).get(index + 1),
+                )
+                if prebuild:
+                    bundles[index] = bundle
+        if index == start:
+            # The conditioning output for downstream sampler chains: the first
+            # executed shot's positive bundle (prompt + reference encoding).
+            first_positive = bundle["positive"]
+        if prebuild and release_clip and clip is not None and index == end:
+            # Hoisted mode: every shot is built by now — release once.
+            _release_clip(plan, clip)
+            clip = None
+        elif not prebuild and release_clip and clip is not None:
+            # Lazy mode: release right after this shot's build (the historical
+            # per-shot cycle — reload happens before the next shot's build).
+            _release_clip(plan, clip)
+            clip = None
 
         seg_seed = int(seed) if seed_policy == "fixed" else int(seed) + (index - start)
         seg_model = _apply_model_loras(model, segment.get("loras") or [], lora_cache)
@@ -1263,6 +1277,13 @@ class _SegmentedAVGuider:
 
 
 class MiniMaxH3SegmentGuiderGH(io.ComfyNode):
+    # Never serve this node from the output cache: its cached payload embeds
+    # the prebuilt shot-1 conditioning bundle (and the loaded clip object),
+    # and reusing those across queues is the pipeline's cross-run state
+    # channel.  Lanxi's integrated sampler rebuilt conditioning on every
+    # queue; NOT_IDEMPOTENT restores that fresh-per-queue guarantee.
+    NOT_IDEMPOTENT = True
+
     @classmethod
     def define_schema(cls):
         return io.Schema(
@@ -1601,22 +1622,32 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
             seed = obj_seed
 
     if external_sigmas is None:
-        # T8's published refine recipe (chunked_two_pass low-sigma plan v3):
-        # "BasicScheduler(simple, N steps, denoise d)" - the TAIL of a longer
-        # simple schedule, so the second pass is a gentle img2img polish
-        # (denoise 0.30 in the released workflow, 0.40 max upstream) instead
-        # of the near-full regeneration a truncated shift-12 schedule gives
-        # (9/4 enters at sigma 0.938!).  total = steps/denoise mirrors comfy's
-        # own KSampler denoise handling; base/coarse only set the step count.
         refine_steps = max(1, int(base_steps) - max(1, min(int(coarse_steps), int(base_steps) - 1)))
         entry = max(0.02, min(1.0, float(refine_entry_sigma)))
-        total = max(refine_steps + 1, int(round(refine_steps / entry)))
-        model_sampling = _make_sampling(
-            model, model.get_model_object("model_sampling"),
-            float(shift_video), float(shift_audio), False,
-        )
-        full = comfy.samplers.calculate_sigmas(model_sampling, "simple", total).float().cpu()
-        external_sigmas = full[-(refine_steps + 1):]
+        if entry < 0.999:
+            # entry IS the entrance sigma: an absolute linear ramp entry -> 0.
+            # The T8 "BasicScheduler(simple, N, denoise d)" tail mapping is
+            # grid-dependent — on the pika shift-12 grid a "denoise 0.30" tail
+            # of a 13-step schedule silently enters at sigma ~0.84 (the high
+            # shift packs sigma into the top of the schedule), turning the
+            # second pass into a near-full regeneration.  That regeneration
+            # sits outside a distilled/acceleration LoRA's trained grid, whose
+            # prior then overrides conditioning and washes out reference
+            # identity.  The absolute ramp keeps the entrance exactly where
+            # the widget says (0.30 lands right at the pika grid's own
+            # 0.333 low-sigma step), so the refine stays the gentle polish
+            # the T8 recipe intends regardless of shift.
+            external_sigmas = torch.linspace(entry, 0.0, refine_steps + 1).float().cpu()
+        else:
+            # 1.0 = full regeneration semantics: the legacy truncated shift
+            # schedule (the pre-T8 9/4 behavior, entry at sigma ~0.94).
+            total = max(refine_steps + 1, int(round(refine_steps / entry)))
+            model_sampling = _make_sampling(
+                model, model.get_model_object("model_sampling"),
+                float(shift_video), float(shift_audio), False,
+            )
+            full = comfy.samplers.calculate_sigmas(model_sampling, "simple", total).float().cpu()
+            external_sigmas = full[-(refine_steps + 1):]
 
     lora_cache = _lora_cache()
     clip_obj = plan.get("clip")
@@ -1633,26 +1664,16 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
     # independent draws that clash at the seams.
     g_video, g_audio = _make_noise(refined_latent.get("samples"), seed).unbind()
 
-    # Pre-build every shot's conditioning with ONE text-encoder load (same
-    # rationale as the first pass): the per-shot CLIP unload/reload cycle
-    # collapses to one load + one release before the first window samples.
-    # The template's zero latent is dead weight here (every window replaces
-    # its samples with the upscaled slice), so drop it right after each build
-    # to keep the hoisted retention at just the conditioning tensors.
+    # Conditioning builds are LAZY by default (same rationale as pass 1):
+    # each window builds right before it samples with the historical CLIP
+    # unload/reload cycle between windows.  LK_PREBUILD=1 restores the hoisted
+    # single-load experiment.  The template's zero latent is dead weight here
+    # (every window replaces its samples with the upscaled slice), so drop it
+    # right after each build.
+    import os
+    prebuild = os.environ.get("LK_PREBUILD") == "1"
     bundles = {}
-    for index in range(start, end + 1):
-        if clip_obj is None:
-            clip_obj = _load_clip(plan)
-        bundle = build_segment_bundle(
-            plan, index, first_frame_override=None, clip=clip_obj,
-            connected=(plan.get("connected_by_segment") or {}).get(index + 1),
-        )
-        bundle["av_latent"].pop("samples", None)
-        bundles[index] = bundle
-    first_positive = bundles[start]["positive"]
-    if release_clip and clip_obj is not None:
-        _release_clip(plan, clip_obj)
-        clip_obj = None
+    first_positive = None
 
     for index in range(start, end + 1):
         entry = entries[index - start]
@@ -1661,7 +1682,25 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
         seg_video = video[..., v0:v0 + vt, :, :]
         seg_audio = audio[..., a0:a0 + at]
 
-        bundle = bundles[index]
+        bundle = bundles.get(index)
+        if bundle is None:
+            if clip_obj is None:
+                clip_obj = _load_clip(plan)
+            bundle = build_segment_bundle(
+                plan, index, first_frame_override=None, clip=clip_obj,
+                connected=(plan.get("connected_by_segment") or {}).get(index + 1),
+            )
+            bundle["av_latent"].pop("samples", None)
+            if prebuild:
+                bundles[index] = bundle
+            else:
+                # Lazy (historical cycle): release right after this window's
+                # build; the next window reloads.
+                if release_clip and clip_obj is not None:
+                    _release_clip(plan, clip_obj)
+                    clip_obj = None
+        if index == start:
+            first_positive = bundle["positive"]
 
         # Swap the template's samples for this shot's slice of the upscaled
         # film; the template's metadata (audio mode, keyframe bookkeeping)
@@ -1893,6 +1932,11 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
 
 
 class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
+    # Same fresh-per-queue guarantee as the segment guider: the refine embeds
+    # per-shot conditioning and the upscale state in its execution; cached
+    # reuse across queues is a cross-run state channel.
+    NOT_IDEMPOTENT = True
+
     @classmethod
     def define_schema(cls):
         return io.Schema(
@@ -1943,7 +1987,7 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
                 io.Float.Input(
                     "refine_entry_sigma", default=0.30, min=0.02, max=1.0, step=0.05,
                     optional=True,
-                    tooltip="精修去噪强度（denoise）。T8 发布配方：simple 调度、3 步、denoise 0.30（上限 0.40）——二采是轻度 img2img 润色而不是重生成，0.94 入口的重生成正是网格斑/颜色漂移的来源。噪声来自全片共享的全局噪声场按位置切片，邻镜重建相互关联。",
+                    tooltip="精修入口 σ（绝对值，精确生效）：调度从该 σ 线性降到 0。0.30 恰落在 pika 官方网格的低噪区（~0.333），是蒸馏/加速 LoRA 窗口内的轻度润色；调高到 0.5+ 开始改写纹理，1.0 = 旧截断调度（接近全量重生成，会冲掉参考身份）。噪声来自全片共享的全局噪声场按位置切片，邻镜重建相互关联。",
                 ),
                 io.Combo.Input(
                     "upscale_model",

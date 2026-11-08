@@ -221,7 +221,8 @@
         "name": "Carry Head Context Noise"
       },
       "refine_entry_sigma": {
-        "name": "Refine Denoise"
+        "name": "Refine Denoise",
+        "tooltip": "Refine entrance sigma (absolute, exact): the schedule ramps linearly from this sigma to 0. 0.30 sits at the pika grid low-sigma zone - a gentle in-window polish for distilled LoRAs. 1.0 = legacy truncated schedule (near-full regeneration)."
       },
       "runtime": {
         "name": "解码设置",

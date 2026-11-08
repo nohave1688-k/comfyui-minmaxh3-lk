@@ -1,102 +1,118 @@
 # ComfyUI MiniMax H3 LK (Long Video)
 
-> MiniMax H3 长视频工作流插件 —— ComfyUI-MiniMaxH3-lanxi 的瘦身重建版。
+> MiniMax H3 分段多镜头音视频生成插件 —— ComfyUI-MiniMaxH3-lanxi 的重建版。
 >
-> 只保留长视频核心链路，节点 ID 全新命名，可与旧 lanxi 包共存。
+> T8 式两跑高清化：分段引导一采（T8 原语分解）→ 潜空间放大 → 二跑分段精修，
+> 全程打包 AV 潜空间（视频+音频联合生成、联合解码）。
 
-## 节点
+## 节点总览（7 个）
 
-### LKH3Studio —— MiniMaxH3长视频操作台（LK）
+| 节点 | 显示名 | 角色 |
+|---|---|---|
+| `LKH3Composer` | MiniMaxH3 长视频编排（LK） | 一站式编排：全片提示词 + 模型选择 + 分镜收集 + 空白 AV 模板 |
+| `LKH3Shot` | MiniMaxH3分镜（LK） | 单个镜头：时长、提示词、参考媒体、LoRA/RefMod 行（面板管理） |
+| `LKH3SegmentGuider` | MiniMax-H3 分段引导（LK） | 一跑 GUIDER：持有分段循环（逐镜条件化 + LoRA + latent 续接），自带 SAMPLER/SIGMAS |
+| `LKH3RefineSegments` | MiniMax-H3 二跑分段精修（LK） | 二跑：放大后的整条潜空间逐镜精修（HD 条件化重编码、精修调度、一跑音频原样保留） |
+| `LKH3AVUpscale` | MiniMax-H3 AV潜空间放大（LK） | 打包 AV 潜空间的空间放大（只插值视频部分） |
+| `LKH3ReferenceFocus` | MiniMax-H3 参考聚焦（LK） | 参考照片预处理：YuNet 人脸检测 → 身份特写表，强化角色一致性 |
+| `LKH3AVDecode` | MiniMax-H3 AV解码（LK） | 打包 AV 潜空间 → 帧 + 音频（按消费点解码） |
 
-条件化构建器 + 分段面板：
+分类统一在 `LK/MiniMax H3 Integration`；分段计划插座类型为 `LANXI_H3_SEGMENTS`
+（刻意沿用旧名：计划结构与 lanxi 前身包的长视频采样器互通）。
 
-- 三种模式：文生关键帧 / 全参考 / **多分段长视频**
-- 1-8 个分段，每段独立的提示词、首帧/尾帧、图片/视频/音频参考、RefMod、LoRA 槽（×4）
-- **按分段连线媒体**（本插件的增量功能）：把上游节点（加载图片/加载视频/加载音频/PS）的连线
-  直接拖到面板按钮上即可——连线内容覆盖面板上传的同槽位素材；按钮实时显示连接状态，
-  点击已连线按钮断开并恢复面板素材
-- 分段运行范围、复制上一段、提示词标签（`<图片n>` `<视频n>` `<音频n>`）、提示词优化器
+## 标准工作流（一跑，T8 原语分解）
 
-输出 `segments` 分段计划，接长视频分段采样。
+```
+LKH3Shot ×1-8 ─shot─▶ LKH3Composer ─segments────────▶ LKH3SegmentGuider ─GUIDER┐
+                             │           ├─空白AV模板─▶ SamplerCustomAdvanced ◀─SIGMAS┤
+                             │           │                ▲noise（RandomNoise 原语） │
+                             │           └─CLIP/VAE────▶ （按需连给引导/精修/解码）    ─SAMPLER┘
+                             │
+                             └─ SamplerCustomAdvanced 输出 LATENT ─▶ LKH3AVDecode ─▶ 图像 + 音频
+```
 
-### LKH3LongVideo —— MiniMax-H3 长视频分段采样（LK）
-
-分段采样执行器：逐段 LoRA 挂载 → 双时钟采样（视频/音频独立调度）→ 段间 latent 续接
-（上一段尾部 7 个 latent token / 22 帧无缝衔接）→ 音视频联合解码 → 拼接。
-参数：steps/shift_video/shift_audio/seed(+策略)/context_noise（接缝噪声）/cfg/release_clip/free_between_segments。
-
-新增：
-
-- **av_latent 输出**：执行范围的全片打包 AV 潜空间（含 `lk_layout` 分段布局元数据），
-  供潜空间放大 / 二跑 / 其它潜空间节点使用
-- **二跑（高清化）**：`refine_latent`（接放大后的 AV 潜空间）、`refine_denoise`
-  （截断 sigma 起点，0.3–0.5 锐化放大 latent，1.0 等于完全重采）、`refine_audio`
-  （keep = 二跑音频与一跑逐位一致；regenerate = 音频也参与低噪重采）。
-  注意：一跑必须跑满全部分段范围（range=1..N），否则 latent 不含全部分段布局
-
-### LKH3AVUpscale —— MiniMax-H3 AV潜空间放大（LK）
-
-只对 AV 潜空间的**视频部分**做空间插值（nearest-exact/bilinear/area/bicubic/lanczos，
-`scale_by` 默认 2.0 = 0.5MP 基础画布 → H3 训练上限 ~1920×1088）；音频部分、音频 mask
-与 `lk_layout` 元数据原样透传。
+- **LKH3Composer**：`film_prompt` 拼到每个镜头提示词前（主体定义/风格块/`<图片n>` 标签）；
+  `aspect`+`megapixels`（默认 0.5MP）定全局画布；`audio_mode`（lock_source / reference_only /
+  native）管音频来源；`latent_continue` 开关段间潜空间续接；`range_start/end` 选跑哪些镜头。
+  输出的 **空白AV模板**（含 `lk_layout` 布局）直接接 SamplerCustomAdvanced 的 `latent_image`，
+  不再需要独立的模板/断环节点。
+- **LKH3Shot**：时长 2-30s（自动对齐 17n+5 帧网格）；参考媒体走原生连线插座
+  （首/尾帧、参考图×6、参考视频×2、参考音频×3）；LoRA/RefMod 行由前端面板管理
+  （序列化在 `shot_json`）。
+- **LKH3SegmentGuider**：把 SamplerCustomAdvanced 拆出的原语组合成分段循环——
+  逐镜条件化 + 逐镜 LoRA + 潜空间续接（上一镜尾部 7 latent token / 22 帧）。
+  SAMPLER/SIGMAS 由本节点从同一份 steps/shifts 配方生成（单一事实来源，无独立契约节点）。
+  每镜采样器按该镜自己的音频长度重建（整片契约采样器会错切分段张量，见节点描述）。
 
 ## 高清化工作流（二跑）
 
 ```
-LKH3Studio ─segments─▶ LKH3LongVideo ─frames/audio（一跑预览）
-                          │ av_latent
-                          ▼
-                     LKH3AVUpscale（scale_by 2.0，方法建议 bilinear/bicubic）
-                          │ av_latent
-                          ▼
-                     LKH3LongVideo.refine_latent（refine_denoise 0.3–0.5）
-                          │ frames/audio（高清成片）+ av_latent（可继续多轮精修）
-                          ▼
-                     保存/合成
+一跑 LATENT ─▶ LKH3AVUpscale（scale_by 2.0 → ~1080p）─▶ LKH3RefineSegments ─▶ LKH3AVDecode ─▶ 高清成片
+                                                            ▲ segments/CLIP/VAE 从 LKH3Composer 连线
 ```
 
-要点：
+- **LKH3AVUpscale**：只对视频部分做空间插值（nearest-exact/bilinear/area/bicubic/lanczos，
+  默认 bilinear、2.0× = 0.5MP 基础画布 → H3 训练上限 ~1920×1088）；音频、mask 与
+  `lk_layout` 元数据原样透传。
+- **LKH3RefineSegments**：逐镜切片精修，条件化按**放大后的画布**重建（参考图 HD 重编码，
+  等价 T8 的 HIGH-conditioning）。精修调度 = base_steps(9) 基础调度从 coarse_steps(4) 截断的
+  尾段（精修步数 = base − coarse），入口去噪 `refine_entry_sigma` 默认 0.30（T8 发布配方：
+  simple 调度、denoise 0.30，二跑是轻度润色而非重生成）。噪声来自**全片共享的全局噪声场**
+  按位置切片，邻镜重建相互关联。`carry_source`：anchor（固定质量锚点，推荐）/ chained
+  （链式接缝）/ none（诊断）。`audio_policy="keep"` 时一跑音频逐位保留
+  （音频与分辨率无关，二跑不重写）。
 
-- 二跑按段切片回灌，逐段保留 LoRA 挂载与 conditioning（关键帧会按放大后的网格自动重编码）
-- 二跑输出帧数与一跑逐帧对齐（音频 keep 模式下音频也逐位一致）
-- `range` 可以只跑子集：未选中段的原 latent 原样保留在输出的 av_latent 里，
-  `segment_info.start_frame` 给出该段在全片时间轴上的绝对起始帧
-- 二跑每段算力约为 scale² 倍（2× 放大 ≈ 4× attention/compute），建议保持
-  release_clip/free_between_segments 开启
+## 关键机制
 
+- **条件化预构建**：一跑/二跑的所有镜头条件化在采样前一次性构建，文本编码器整轮
+  只装载/卸载各一次——多镜头视频的采样阶段零 CLIP 搬运；`release_clip` 语义为
+  "构建完成后、首镜采样前释放一次"（显存紧张仍应保持开启；16GB 卡两个 advanced
+  开关都建议保持默认 true）
+- **潜空间续接**：上一镜尾部 7 个 latent token（=22 帧）+ 36 音频步写入下一镜头部，
+  由 denoise_mask 锁定；输出侧裁掉重复帧，全片逐帧连续
+- **打包 AV 潜空间**：视频 [1,24,T,H/16,W/16] + 音频 [1,32,2,T_a] 的 NestedTensor
+  （`lk_layout` 记录逐镜布局），是所有采样/放大/解码节点的通用交换格式
 
 ## 与旧 lanxi 包的关系
 
 | | lanxi（旧） | 本包 |
 |---|---|---|
-| 节点 | 7 个已注册 + 16 个未注册 RefMod | **3 个**（纯长视频核心 + 潜空间放大） |
+| 节点 | 7 个已注册 + 16 个未注册 RefMod | **7 个**（编排/分镜/引导/精修/放大/聚焦/解码） |
+| 一跑形态 | 适配器 + 一体化采样器 | T8 原语分解（GUIDER + SamplerCustomAdvanced） |
+| 二跑形态 | 二采分块采样器 + Latent 上采样器 | `LKH3AVUpscale` + `LKH3RefineSegments` |
 | 注册方式 | V1 双轨 + comfy_entrypoint | 纯 `NODE_CLASS_MAPPINGS`（V3 类原生执行） |
-| 节点 ID | `LanxiH3Studio` 等 | `LKH3Studio` 等（可共存） |
+| 节点 ID | `LanxiH3Studio` 等 | `LKH3*`（可共存） |
+| 计划插座 | `LANXI_H3_SEGMENTS` | 同名同构，**计划可互换** |
 | RefMod 库 | `models/refmods/` | 同一路径，**两包共享** |
 | API 路由 | `/lanxi/...` | `/lk/...` |
 
-移除内容：单模式管线（适配器 + 独立双时钟采样 + AV 解码三件套，上游已断链）、
-二采分块采样器、16 个未注册的 RefMod 图节点（RefMod 库功能保留在面板底层）；
-潜空间上采样能力以新的 `LKH3AVUpscale` + `refine_latent` 二跑链路回归。
-
-**注意**：两包可同时安装共存（节点 ID 不同），但请勿同时把两家的面板用于同一个
-工作流节点；迁移旧工作流时，把 `LanxiH3Studio` 换成本包的 `LKH3Studio` 并重新接线。
-
 ## 安装
 
-放入 `ComfyUI/custom_nodes/`，重启 ComfyUI。依赖与 lanxi 相同（见 requirements.txt）。
+放入 `ComfyUI/custom_nodes/`，重启 ComfyUI。硬依赖见 `requirements.txt`
+（torch/safetensors/numpy/Pillow/sentencepiece/transformers≥4.49/accelerate/imageio-ffmpeg）；
+**参考聚焦**需要 `opencv-python`（YuNet 检测器），RefMod 视频加载器可选装 opencv 或 imageio。
 
 ## 结构
 
 ```
-gh/            引擎（操作台、分段计划、双时钟采样、条件化、音频解码、潜空间放大、提示词优化）
+gh/            引擎（编排/分镜、条件化、双时钟采样、预构建循环、精修、AV解码、参考聚焦、提示词优化）
 refmod/        RefMod 参考库（面板底层，存储于 models/refmods/）
-web/js/        操作台前端面板
-locales/       中英文翻译
+web/js/        统一前端面板（分镜 LoRA/RefMod 行、参考媒体、提示词优化器）
+locales/       中英文翻译（nodeDefs.json 按节点/输入名组织）
+models/        face_detection_yunet_2023mar.onnx（参考聚焦内置检测器，230KB）
 ```
+
+## API 路由
+
+`/lk/minimax_h3/loras`（LoRA 列表）、`/lk/refmods/library`（RefMod 库）、
+`/lk/minimax-h3/prompt-optimizer/*`（提示词优化器配置/模型/状态）。
 
 ## 增量开发
 
-- 分段数据契约：`_normalize_segment`（gh/long_video.py）与前端 `normalizeSegment` 需同步
-- 连线媒体：插座名 `conn_segN_kind.N`（N 为 0 起始序号），收集逻辑在 `gh/nodes.py::_collect_connected_media`
-- API 路由前缀 `/lk/...`（loras / prompt-optimizer / refmods/library）
+- 分镜数据契约：`gh/nodes.py` 的 shot 计划构建与前端 `web/js/minimax_h3_unified.js`
+  的 `shot_json` 序列化需同步
+- 新增输入/输出记得同步 `locales/{zh,en}/nodeDefs.json`（按输入名与输出索引组织，
+  缺条目时回退英文名）
+- 采样语义改动先读 `gh/long_video.py` 的 `run_long_video` / `run_refine_segments`
+  与 `gh/sampling.py` 的双时钟实现；二跑调度的 T8 对齐依据写在节点 tooltip 与
+  `run_refine_segments` docstring 里

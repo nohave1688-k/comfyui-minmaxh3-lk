@@ -4,6 +4,7 @@ import ast
 import inspect
 import logging
 import math
+import os
 import weakref
 from pathlib import Path
 
@@ -78,6 +79,16 @@ def _encode_fingerprint(packed_prompt, branch, ref_items, keyframe_images):
 
 
 def _cached_conditioning_encode(clip, tokens, cache_key):
+    # A/B TEST STATE: the encode cache is BYPASSED by default.  It is the only
+    # change to the conditioning content path since the flicker-settled
+    # reference (4fe6157), and the reported "haunted" reference adherence is
+    # cache-flavored (hit/miss depends on prompt/ref fingerprint collisions
+    # and the 16-entry FIFO).  Restore the cache with LK_ENCODE_CACHE=1 once
+    # the adherence A/B concludes.
+    import os
+    if os.environ.get("LK_ENCODE_CACHE") != "1":
+        logging.info("[LKH3] 编码缓存已旁路（A/B 对照） —— 本镜完整重编码")
+        return clip.encode_from_tokens_scheduled(tokens)
     clip_ref = weakref.ref(clip)
     key = (clip_ref, cache_key)
     cached = _ENCODE_CACHE.get(key)
@@ -467,6 +478,47 @@ def build_conditioning(
     for image_ordinal, image in ref_image_entries:
         resized, ref_width, ref_height = _resize_reference_image(image, width, height, ref_image_size)
         encoded = video_vae.encode(resized)
+        if logging.getLogger().isEnabledFor(logging.INFO):
+            # Reference-adherence forensics, fully self-logging: every encode
+            # appends to user/LK_debug/refdbg.jsonl and drops a timestamped PNG
+            # of the EXACT image fed to the VAE.  Cross-run comparison (same
+            # shot, consecutive queues) is then read straight from the files.
+            try:
+                import io as _io
+                import json as _json
+                import time as _time
+
+                with torch.no_grad():
+                    _e = encoded.detach().float()
+                    _r = resized.detach()[0].clamp(0, 1).mul(255).round().to(torch.uint8).cpu()
+                from PIL import Image as _PILImage
+                import folder_paths as _folder_paths
+
+                _stamp = _time.strftime("%Y%m%d_%H%M%S")
+                _dbgdir = os.path.join(_folder_paths.get_user_directory(), "LK_debug")
+                os.makedirs(_dbgdir, exist_ok=True)
+                _png = os.path.join(_dbgdir, f"refdbg_{_stamp}_ord{image_ordinal}.png")
+                _PILImage.fromarray(_r.numpy()).save(_png, format="PNG")
+                _entry = {
+                    "ts": _stamp,
+                    "ordinal": image_ordinal,
+                    "w": int(ref_width),
+                    "h": int(ref_height),
+                    "shape": list(_e.shape),
+                    "std": round(float(_e.std()), 6),
+                    "mean": round(float(_e.mean()), 6),
+                    "vae": type(video_vae).__name__,
+                    "png": _png,
+                }
+                with open(os.path.join(_dbgdir, "refdbg.jsonl"), "a", encoding="utf-8") as _fh:
+                    _fh.write(_json.dumps(_entry, ensure_ascii=False) + "\n")
+                logging.info(
+                    "[LKH3] 参考图%d VAE编码: 喂入=%dx%d 潜空间%s std=%.4f mean=%.4f | 存证=%s",
+                    image_ordinal, ref_width, ref_height, tuple(_e.shape),
+                    float(_e.std()), float(_e.mean()), _png,
+                )
+            except Exception as _dbg_err:
+                logging.info("[LKH3] 参考图%d VAE编码诊断失败: %s", image_ordinal, _dbg_err)
         real_ref_items.append({"type": "image", "data": resized})
         real_ref_blocks.append(
             {
