@@ -1084,6 +1084,23 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
             if seg_amask is not None:
                 seg_amask = seg_amask[..., carry_a:]
 
+        if logging.getLogger().isEnabledFor(logging.INFO):
+            # Audio energy profile (first/mid/last thirds) of what this shot
+            # contributes to the film: distinguishes a wholly quiet shot
+            # (generation variance, or the soundscape prompt asking for light
+            # ambience) from a seam dip right after the carried audio head -
+            # the two candidate causes of "audio comes and goes".
+            with torch.no_grad():
+                _a = seg_audio.detach().float()
+                _n = _a.shape[-1]
+                _thirds = (_a[..., :_n // 3], _a[..., _n // 3: 2 * _n // 3], _a[..., 2 * _n // 3:])
+                logging.info(
+                    "[LKH3] 镜头%d 音频能量(前/中/后)=%.3f/%.3f/%.3f 峰值=%.3f",
+                    index + 1,
+                    float(_thirds[0].std()), float(_thirds[1].std()), float(_thirds[2].std()),
+                    float(_a.abs().max()),
+                )
+
         if audio_mode is None:
             audio_mode = samples.get("gh_h3_audio_mode") or plan.get("audio_mode") or "native"
         # All-ones masks carry no information (an absent mask already means
@@ -1705,6 +1722,16 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
             # for model-side A/V alignment - the film's soundtrack stays the
             # first pass's own span, untouched.
             out_audio = seg_audio
+        if logging.getLogger().isEnabledFor(logging.INFO):
+            with torch.no_grad():
+                _a = out_audio.detach().float()
+                _n = _a.shape[-1]
+                _thirds = (_a[..., :_n // 3], _a[..., _n // 3: 2 * _n // 3], _a[..., 2 * _n // 3:])
+                logging.info(
+                    "[LKH3] 精修镜头%d 回填音频(前/中/后)=%.3f/%.3f/%.3f",
+                    index + 1,
+                    float(_thirds[0].std()), float(_thirds[1].std()), float(_thirds[2].std()),
+                )
         previous_samples = samples["samples"]
         collected.append({
             "segment": index + 1,
