@@ -227,10 +227,6 @@
         "name": "解码设置",
         "tooltip": "Bundled CLIP + video/audio VAE - one wire from the composer's 解码设置 output; falls back to name-based loading when absent."
       },
-      "sigmas": {
-        "name": "sigmas",
-        "tooltip": "External refine schedule (used as-is per shot; the refine denoise widget is ignored). Generic entry point for future vendor-specific second-pass schedules - no vendor presets are built in."
-      },
       "noise": {
         "name": "噪声"
       },

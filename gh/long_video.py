@@ -1842,10 +1842,14 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
                     "runtime", optional=True, display_name="解码设置",
                     tooltip="CLIP + 视频/音频 VAE 捆绑 — 从 长视频编排 的 解码设置 连一根线即可。未连接时按模型设置名字加载。",
                 ),
-                io.Sigmas.Input(
-                    "sigmas", optional=True, display_name="sigmas",
-                    tooltip="外接精修调度表（原样逐镜使用，refine 去噪强度控件被忽略）。给未来厂商专用二采调度留的通用入口——不内置任何厂商预设。",
-                ),
+                # No external sigmas socket here ON PURPOSE: the refine is a
+                # polish layer whose schedule must be a low-sigma tail.  A
+                # visible socket invites wiring a vendor's FULL first-pass
+                # schedule (sigma starts at 1.0), silently turning pass 2 into
+                # a full regeneration and discarding the first pass's
+                # continuity.  The denoise widget covers schedule tuning; the
+                # engine-level external_sigmas parameter stays available for a
+                # future guarded UI.
                 io.Noise.Input(
                     "noise", optional=True, display_name="噪声",
                     tooltip="外接 NOISE 原语（贡献每镜种子与噪声生成）。未连接时内置生成。",
@@ -1865,7 +1869,7 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
                 release_clip=True, free_between_segments=True,
                 carry_source="anchor", context_noise=0.15,
                 refine_entry_sigma=0.30,
-                runtime=None, sigmas=None, noise=None):
+                runtime=None, noise=None):
         clip, video_vae, audio_vae = runtime_parts(runtime)
         return io.NodeOutput(*run_refine_segments(
             model, segments, av_latent,
@@ -1877,5 +1881,5 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
             audio_policy=audio_policy, carry_source=carry_source,
             context_noise=context_noise, refine_entry_sigma=refine_entry_sigma,
             clip=clip, video_vae=video_vae, audio_vae=audio_vae,
-            external_sigmas=sigmas, external_noise=noise, external_sampler=None,
+            external_sigmas=None, external_noise=noise, external_sampler=None,
         ))

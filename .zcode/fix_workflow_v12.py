@@ -85,7 +85,6 @@ nodes[115]["inputs"] = inputs_for([
     ("segments", "LANXI_H3_SEGMENTS", False, 160),
     ("model", "MODEL", False, 161),
     ("runtime", "LK_H3_RUNTIME", True, 179),
-    ("sigmas", "SIGMAS", True, None),
     ("noise", "NOISE", True, 165),
 ])
 
@@ -148,7 +147,7 @@ for inp in nodes[71].get("inputs", []):
 data["links"] = [l for l in links if l[0] not in REMOVE_LINKS] + NEW_LINKS
 for l in data["links"]:
     if l[0] == 165:
-        l[4] = 5  # refine noise wire -> its slot in [av, segments, model, runtime, sigmas, noise]
+        l[4] = 4  # refine noise wire -> its slot in [av, segments, model, runtime, noise]
 data["nodes"] = list(nodes.values())
 data["last_node_id"] = 118
 data["last_link_id"] = 184
