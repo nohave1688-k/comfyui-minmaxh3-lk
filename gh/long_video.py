@@ -1444,8 +1444,8 @@ def _learned_upscale_film(refined_latent, model_name, scale_by):
         layout["video_hw"] = [pt_h, pt_w]
         out["lk_layout"] = layout
     logging.info(
-        "[LKH3] 内部学习型放大: %dx%d -> %dx%d (x%.2f, %s)",
-        w, h, pw, ph, scale_by, model_name,
+        "[LKH3] 内部学习型放大: %dx%d -> %dx%d tokens (x%.2f, %s)",
+        w, h, pt_w, pt_h, scale_by, model_name,
     )
     return out
 
