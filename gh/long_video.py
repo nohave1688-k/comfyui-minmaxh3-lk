@@ -351,11 +351,13 @@ def build_segment_bundle(plan, index, first_frame_override=None, clip=None, conn
     # shows up here as a warning line — the model cannot reference media that
     # was never packed.
     logging.info(
-        "[LKH3] 镜头%d 条件打包: pictures=%d videos=%d audios=%d | %s",
+        "[LKH3] 镜头%d 条件打包: pictures=%d videos=%d audios=%d loras=%d mods=%d | %s",
         index + 1,
         len(refs),
         len(ref_videos),
         len(audios),
+        len(segment.get("loras") or []),
+        len(mods),
         " | ".join(report.splitlines()[:10]),
     )
     return bundle
