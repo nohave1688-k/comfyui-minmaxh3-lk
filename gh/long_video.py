@@ -884,32 +884,21 @@ def _assemble_whole_av_latent(collected, audio_mode, latent_continue, start, end
 
 
 def _external_sampler_for(av_latent, external_sampler):
-    """Validate an externally handed-in sampler against THIS segment latent.
+    """Validate an externally handed-in dual-clock KSAMPLER against THIS latent.
 
-    Precedence: the SCA-wired sampler wins over the widget whenever it is safe
-    to use.  Standard comfy samplers (lcm/euler/...) are stateless and pass
-    through for per-segment use; the native FLOW_AV model-sampling patch is
-    applied by the caller.  Dual-clock KSAMPLERS are split-point-coupled: ours
-    carry ``_goohai_audio_values`` and are accepted only when the split matches
-    this segment; foreign dual-clock samplers (e.g. another pack's) carry no
-    verifiable split and are rejected - the loop falls back to the per-segment
-    builtin built from the widget, with a log line.
-
-    Why reject at all: the dual-clock euler splits the packed AV tensor at
-    ``packed - audio_values`` where ``audio_values`` was captured from the
-    latent the sampler was BUILT on.  A whole-film sampler aimed at a single
-    segment puts that segment's tail plus its real audio on the AUDIO clock -
-    the silent mis-denoise that used to compound hop over hop.
+    The dual-clock euler splits the packed AV tensor at ``packed - audio_values``
+    where ``audio_values`` was captured from the latent the sampler was BUILT
+    on.  Contract samplers are built on the whole-film template, so their split
+    is wrong for every individual segment: each segment's tail (plus its real
+    audio) silently took the AUDIO clock instead of the video clock, and since
+    that tail is exactly what the next shot carries, the film degraded hop over
+    hop.  The original pack never hit this because it rebuilds the sampler per
+    segment.  Reject mismatched samplers and fall back to the per-segment
+    builtin.
     """
     if external_sampler is None:
         return None
-    dual = getattr(external_sampler, "_goohai_dual_clock", False)
     want = getattr(external_sampler, "_goohai_audio_values", None)
-    if dual and want is None:
-        logging.info(
-            "[LKH3] 外接双钟采样器无法验证音频切分 —— 本镜改用按本镜音频长度构建的内置双钟采样器"
-        )
-        return None
     if want is None:
         return external_sampler
     _video, audio = nested_av_parts(av_latent)
@@ -1212,12 +1201,13 @@ class _SegmentedAVGuider:
 
     ``noise``/``latent_image`` handed in by SamplerCustomAdvanced are the
     whole-template artifacts of that composition; the loop builds its own
-    per-shot templates and noise. The primitives that matter are the sigmas,
-    the seed and the sampler - downstream wiring WINS over the widgets: a
-    standard SCA-wired sampler runs per segment as-is, a dual-clock contract
-    sampler is re-validated per segment (see _external_sampler_for), and the
-    widget pair (采样器/调度器) only builds the per-segment fallback when the
-    SCA sampler cannot serve the segment.
+    per-shot templates and noise. The primitives that matter are the sigmas
+    and the seed.  The SAMPLER deliberately does NOT flow in: the dual-clock
+    euler bakes the audio-element count of the latent it was built on, so a
+    whole-film contract sampler mis-splits every per-segment packed tensor —
+    each segment rebuilds its own sampler instead (exactly what the original
+    pack's per-segment loop does).  The contract sampler this node emits stays
+    a wiring requirement of SamplerCustomAdvanced, nothing more.
     """
 
     def __init__(self, model_patcher, plan, *, steps, shift_video, shift_audio,
@@ -1251,12 +1241,11 @@ class _SegmentedAVGuider:
             context_noise=self._context_noise,
             video_vae=self._video_vae, audio_vae=self._audio_vae,
             prebuilt=self._prebuilt,
-            # Downstream wins: a standard SCA-wired sampler (KSamplerSelect ->
-            # lcm/euler/...) is used per segment as-is; the contract's
-            # dual-clock sampler is re-validated per segment by
-            # _external_sampler_for and falls back to the widget-built builtin
-            # when its whole-film audio split cannot serve this segment.
-            external_noise=None, external_sigmas=sigmas, external_sampler=sampler,
+            # The SCA sampler is the whole-film contract object; per-segment
+            # dual-clock samplers must be rebuilt against each segment's own
+            # audio length (see _external_sampler_for), so only the schedule
+            # flows in from the primitives.
+            external_noise=None, external_sigmas=sigmas, external_sampler=None,
         )
         return av_latent["samples"]
 
