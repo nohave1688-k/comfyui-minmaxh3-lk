@@ -1417,13 +1417,14 @@ def _learned_upscale_film(refined_latent, model_name, scale_by):
     video, audio = nested_av_parts(refined_latent)
     t = int(video.shape[2])
     h, w = int(video.shape[3]), int(video.shape[4])
-    # Target size in PIXEL space, floored to the /16 token grid (official node
-    # semantics: it receives pixel width/height and divides by 16).  This keeps
-    # the scale isotropic: token-space rounding here once distorted 39x23 into
-    # 64x32 (anisotropy 1.18) and the learned resizer - which T8 gates behind a
-    # max_anisotropy of 1.05 - returned garbage (the mosaic report).
-    pt_h = max(16, int(h * 16 * scale_by) // 16)
-    pt_w = max(16, int(w * 16 * scale_by) // 16)
+    # Target size in PIXEL space, floored to the /32 CANVAS grid (H3
+    # conditioning requires width/height divisible by 32, and T8's upscaler
+    # outputs the same /32 grid - its docs promise /32-divisible pixels).
+    # Token counts are therefore even.  Token-space /16 rounding once produced
+    # an anisotropic 64x32 target and the learned resizer - gated behind
+    # max_anisotropy 1.05 by T8 - returned garbage (the mosaic report).
+    pt_h = max(2, (int(h * 16 * scale_by) // 32) * 2)
+    pt_w = max(2, (int(w * 16 * scale_by) // 32) * 2)
     if (pt_h, pt_w) == (h, w):
         return refined_latent
     size = (t, pt_h, pt_w)
@@ -1526,7 +1527,7 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
                 a_cursor += a_steps
             logging.warning(
                 "[LKH3] 布局跨度与实际影片不符(视频 %d vs %d / 音频 %d vs %d)——"
-                "放大器按时长重推了每镜跨度，已按一采续接裁剪重推: %s",
+                "布局携带的是每镜全时长跨度（缺少一采续接裁剪），已按裁剪重推真实跨度: %s",
                 span_sum, int(video.shape[2]), audio_sum, int(audio.shape[-1]),
                 [e["video_tokens"] for e in rebuilt],
             )
