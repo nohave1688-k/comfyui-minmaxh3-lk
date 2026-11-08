@@ -26,8 +26,10 @@ data = json.load(io.open(SRC, encoding="utf-8"))
 nodes = {n["id"]: n for n in data["nodes"]}
 links = data["links"]
 
-REMOVE_LINKS = {3, 11, 12, 13, 14, 17, 18, 99, 144, 153}
+REMOVE_LINKS = {3, 11, 12, 13, 14, 17, 18, 99, 118, 119, 122, 144, 153, 162, 163, 164}
 NEW_LINKS = [
+    [178, 105, 5, 47, 2, "LK_H3_RUNTIME"],  # composer 解码设置 -> guider
+    [179, 105, 5, 115, 3, "LK_H3_RUNTIME"], # composer 解码设置 -> refine
     [182, 4, 0, 96, 0, "MODEL"],    # sage -> pika
     [183, 96, 0, 19, 0, "MODEL"],   # pika -> cinematic (refine style chain)
     [184, 118, 0, 71, 3, "SIGMAS"], # ManualSigmas -> SCA.sigmas
@@ -51,6 +53,41 @@ nodes[118] = {
     "widgets_values": [FLEX_SIGMA_STRING],
     "widgets_values_named": {"sigmas": FLEX_SIGMA_STRING},
 }
+
+# --- composer outputs rebuilt to the 6-slot bundle-era layout ---
+nodes[105]["outputs"] = [
+    {"name": "segments", "type": "LANXI_H3_SEGMENTS", "links": [114, 160]},
+    {"name": "空白AV模板", "type": "LATENT", "links": [116]},
+    {"name": "CLIP", "type": "CLIP", "links": []},
+    {"name": "视频 VAE", "type": "VAE", "links": [169, 174]},
+    {"name": "音频 VAE", "type": "VAE", "links": [170, 175]},
+    {"name": "解码设置", "type": "LK_H3_RUNTIME", "links": [178, 179]},
+]
+
+# --- guider/refine input arrays rebuilt per the new schemas ---
+def inputs_for(spec):
+    entries = []
+    for name, ltype, shape7, link in spec:
+        e = {"name": name, "type": ltype, "link": link}
+        if shape7:
+            e["shape"] = 7
+        entries.append(e)
+    return entries
+
+
+nodes[47]["inputs"] = inputs_for([
+    ("model", "MODEL", False, 97),
+    ("segments", "LANXI_H3_SEGMENTS", False, 114),
+    ("runtime", "LK_H3_RUNTIME", True, 178),
+])
+nodes[115]["inputs"] = inputs_for([
+    ("av_latent", "LATENT", False, 159),
+    ("segments", "LANXI_H3_SEGMENTS", False, 160),
+    ("model", "MODEL", False, 161),
+    ("runtime", "LK_H3_RUNTIME", True, 179),
+    ("sigmas", "SIGMAS", True, None),
+    ("noise", "NOISE", True, 165),
+])
 
 # --- widget resets ---
 nodes[107]["widgets_values"] = [5, "fixed"]
@@ -111,7 +148,7 @@ for inp in nodes[71].get("inputs", []):
 data["links"] = [l for l in links if l[0] not in REMOVE_LINKS] + NEW_LINKS
 for l in data["links"]:
     if l[0] == 165:
-        l[4] = 4  # refine noise wire slot 6 -> 4 (runtime+sigmas inputs ahead)
+        l[4] = 5  # refine noise wire -> its slot in [av, segments, model, runtime, sigmas, noise]
 data["nodes"] = list(nodes.values())
 data["last_node_id"] = 118
 data["last_link_id"] = 184
