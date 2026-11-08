@@ -1273,10 +1273,10 @@ class MiniMaxH3SegmentGuiderGH(io.ComfyNode):
                 io.Float.Input("shift_video", default=12.0, min=0.01, max=100.0, step=0.01),
                 io.Float.Input("shift_audio", default=3.0, min=0.01, max=100.0, step=0.01),
                 io.Combo.Input("sampler_name", options=SAMPLER_OPTIONS, default=DEFAULT_SAMPLER_NAME,
-                               tooltip="dual_clock_euler = 内置双钟欧拉；选标准采样器名（如 lcm）则切 comfy 原生 FLOW_AV 采样 —— Pika Flex 官方路由用 lcm + pika_flex。"),
+                               tooltip="dual_clock_euler = 内置双钟欧拉；选标准采样器名（如 lcm）则切 comfy 原生 FLOW_AV 采样。厂商加速 LoRA 的官方采样器（如 Pika Flex 的 lcm）选标准名即可。"),
                 io.Combo.Input(
                     "scheduler", options=SCHEDULER_OPTIONS, default=DEFAULT_SCHEDULER_NAME,
-                    tooltip="native_flow = 双钟默认调度；pika_flex = Pika Flex 官方专用 6 步 Sigma（恒定值，步数控件被忽略）—— 与 pika LoRA + lcm 采样器配套，即官方 REF2V 配方。",
+                    tooltip="调度表预设，仅当下方 sigmas 未外接时生效。厂商专用调度（如 Pika Flex 的专用 Sigma）不要依赖预设——把它的 Sigma 值放进 ManualSigmas 等节点、接到 SamplerCustomAdvanced 的 sigmas 输入，本包按原样逐镜使用，未来换 LoRA 只改画布不改包。",
                 ),
                 io.Combo.Input("seed_policy", options=["increment", "fixed"], default="fixed",
                                tooltip="increment = 每镜种子+1；fixed = 全部镜头同一种子。基础种子来自 SamplerCustomAdvanced 的噪声原语（RandomNoise 的种子）。"),
@@ -1840,6 +1840,10 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
                     "runtime", optional=True, display_name="解码设置",
                     tooltip="CLIP + 视频/音频 VAE 捆绑 — 从 长视频编排 的 解码设置 连一根线即可。未连接时按模型设置名字加载。",
                 ),
+                io.Sigmas.Input(
+                    "sigmas", optional=True, display_name="sigmas",
+                    tooltip="外接精修调度表（原样逐镜使用，refine 去噪强度控件被忽略）。给未来厂商专用二采调度留的通用入口——不内置任何厂商预设。",
+                ),
                 io.Noise.Input(
                     "noise", optional=True, display_name="噪声",
                     tooltip="外接 NOISE 原语（贡献每镜种子与噪声生成）。未连接时内置生成。",
@@ -1859,7 +1863,7 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
                 release_clip=True, free_between_segments=True,
                 carry_source="anchor", context_noise=0.15,
                 refine_entry_sigma=0.30,
-                runtime=None, noise=None):
+                runtime=None, sigmas=None, noise=None):
         clip, video_vae, audio_vae = runtime_parts(runtime)
         return io.NodeOutput(*run_refine_segments(
             model, segments, av_latent,
@@ -1871,5 +1875,5 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
             audio_policy=audio_policy, carry_source=carry_source,
             context_noise=context_noise, refine_entry_sigma=refine_entry_sigma,
             clip=clip, video_vae=video_vae, audio_vae=audio_vae,
-            external_sigmas=None, external_noise=noise, external_sampler=None,
+            external_sigmas=sigmas, external_noise=noise, external_sampler=None,
         ))

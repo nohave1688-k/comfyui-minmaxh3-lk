@@ -160,8 +160,7 @@
       "scheduler": {
         "name": "调度器",
         "options": {
-          "native_flow": "双钟默认（shift12/3）",
-          "pika_flex": "Pika Flex 官方 6 步 Sigma"
+          "native_flow": "双钟默认（shift12/3）"
         }
       }
     },
@@ -230,6 +229,10 @@
       "runtime": {
         "name": "解码设置",
         "tooltip": "CLIP + 视频/音频 VAE 捆绑 — 从 长视频编排 的 解码设置 连一根线。未连接时按模型设置名字加载。"
+      },
+      "sigmas": {
+        "name": "sigmas",
+        "tooltip": "外接精修调度表（原样逐镜使用，refine 去噪强度控件被忽略）。给未来厂商专用二采调度留的通用入口——不内置任何厂商预设。"
       },
       "noise": {
         "name": "噪声"
