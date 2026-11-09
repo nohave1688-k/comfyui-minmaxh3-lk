@@ -24,6 +24,7 @@ import logging
 import math
 import os
 import shutil
+import time
 
 import folder_paths
 import nodes as comfy_nodes
@@ -555,8 +556,14 @@ def _clamp_shot_audio_mode(value) -> str:
 
 def build_plan_from_shot_nodes(*, settings=None, shots, film_settings=None,
                                latent_continue=True, range_start=1, range_end=1,
-                               clip=None, video_vae=None, audio_vae=None):
-    """Assemble the long-video plan from the composer + ordered LKH3Shot nodes.
+                               clip=None, video_vae=None, audio_vae=None,
+                               max_segments=None):
+    """Assemble the long-video plan from the composer + ordered LKH3Shot
+    nodes / 分镜组 chains.
+
+    ``max_segments``: per-call shot-cap override.  None keeps the legacy
+    MAX_SEGMENTS=8 behaviour (lanxi-style callers); the composer passes
+    max(MAX_SEGMENTS, len(shots)) so 分镜组 chains lift the 8-shot ceiling.
 
     ``settings`` (模型设置) is optional legacy fallback: it only contributes the
     CLIP name plus canvas/audio knobs when the 全片提示词设置 node is absent.
@@ -577,10 +584,11 @@ def build_plan_from_shot_nodes(*, settings=None, shots, film_settings=None,
     film = film_settings if isinstance(film_settings, dict) else {}
     if not isinstance(shots, (list, tuple)) or not shots:
         raise ValueError("至少连接一个「MiniMaxH3分镜」节点到分镜合成节点。")
+    limit = max_segments or MAX_SEGMENTS
 
     try:
-        start = max(1, min(MAX_SEGMENTS, int(range_start)))
-        end = max(1, min(MAX_SEGMENTS, int(range_end)))
+        start = max(1, min(limit, int(range_start)))
+        end = max(1, min(limit, int(range_end)))
     except (TypeError, ValueError):
         start, end = 1, 1
     if start > end:
@@ -608,7 +616,7 @@ def build_plan_from_shot_nodes(*, settings=None, shots, film_settings=None,
     film_prompt = str(film.get("film_prompt") or "").strip()
 
     segments, connected_by_segment = [], {}
-    for i, shot in enumerate(shots[:MAX_SEGMENTS]):
+    for i, shot in enumerate(shots[:limit]):
         idx = i + 1
         shot = shot if isinstance(shot, dict) else {}
         try:
@@ -1073,6 +1081,18 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
     prebuild = os.environ.get("LK_PREBUILD") == "1"
     bundles = {}
     first_positive = None
+    # Frontend/back-end desync tripwire: a widget can RENDER one value while
+    # the serialized slot still holds another (the 1.57.x widget-store rebuild
+    # resets advanced widgets to schema defaults without writing the value
+    # array).  Log what the backend ACTUALLY received every queue, so a stuck
+    # release_clip=true shows up in the console as the TE hot-reload hazard it
+    # is instead of silently degrading reference embeddings.
+    if logging.getLogger().isEnabledFor(logging.INFO):
+        logging.info(
+            "[LKH3] 一跑分段启动: 镜头%d-%d 步数=%d release_clip=%s 续接加噪=%.2f 预构建=%s",
+            start + 1, end + 1, int(steps), bool(release_clip),
+            float(context_noise), prebuild,
+        )
 
     # 分段缓存（项目束，Composer 填了「项目目录」才启用）：键 = 本镜规格
     # hash + 上一镜输出 hash 的递归链，规格或上游任一变化即 miss。
@@ -1523,7 +1543,8 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
                         audio_policy="keep", clip=None, video_vae=None,
                         audio_vae=None, external_sigmas=None, external_noise=None,
                         external_sampler=None, carry_source="anchor",
-                        context_noise=0.15, refine_entry_sigma=0.30):
+                        context_noise=0.15, refine_entry_sigma=0.30,
+                        refine_schedule="native_tail"):
     """Segmented HD second pass: refine an upscaled whole-film AV latent one
     shot at a time.
 
@@ -1554,9 +1575,11 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
     context_noise = _finite_clamp(context_noise, 0.15, 0.0, 1.0)
     refine_entry_sigma = _finite_clamp(refine_entry_sigma, 0.30, 0.02, 1.0)
     logging.info(
-        "[LKH3] 二跑精修启动: 镜头%d-%d base=%d coarse=%d denoise=%.2f 续接=%s | 潜空间形状=%s",
+        "[LKH3] 二跑精修启动: 镜头%d-%d base=%d coarse=%d denoise=%.2f 续接=%s "
+        "release_clip=%s audio=%s | 潜空间形状=%s",
         int(plan["range"]["start"]), int(plan["range"]["end"]),
         int(base_steps), int(coarse_steps), float(refine_entry_sigma), carry_source,
+        bool(release_clip), audio_policy,
         tuple(refined_latent["samples"].shape) if hasattr(refined_latent["samples"], "shape") else "nested",
     )
     video, audio = nested_av_parts(refined_latent)
@@ -1611,7 +1634,8 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
     # and hand the (layout-corrected) upscaled latent through unchanged.
     # Never triggers when external sigmas are wired - a user-owned schedule
     # (e.g. a T8 ParityPlan tail) must run even at a tiny widget denoise.
-    if external_sigmas is None and float(refine_entry_sigma) <= 0.05:
+    if (external_sigmas is None and refine_schedule != "native_tail"
+            and float(refine_entry_sigma) <= 0.05):
         out = {
             "samples": refined_latent["samples"],
             "gh_h3_audio_mode": refined_latent.get("gh_h3_audio_mode")
@@ -1665,7 +1689,23 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
     if external_sigmas is None:
         refine_steps = max(1, int(base_steps) - max(1, min(int(coarse_steps), int(base_steps) - 1)))
         entry = max(0.02, min(1.0, float(refine_entry_sigma)))
-        if entry < 0.999:
+        if refine_schedule == "native_tail":
+            # T8 验收配方（Published LBH schedule 9/4/5）：与一跑同一份 base
+            # 网格从 coarse_steps 截断的尾部——精修全程落在蒸馏 LoRA 的训练
+            # 网格上（网格对齐，无 OOD），入口 σ = 网格第 coarse 步
+            # （9/4 → σ≈0.57 起，重雕预算充足）。此模式忽略 refine_entry_sigma。
+            total_steps = max(int(base_steps), refine_steps + 1)
+            model_sampling = _make_sampling(
+                model, model.get_model_object("model_sampling"),
+                float(shift_video), float(shift_audio), False,
+            )
+            full_grid = comfy.samplers.calculate_sigmas(
+                model_sampling, "simple", total_steps
+            ).float().cpu()
+            split = max(1, min(int(coarse_steps), len(full_grid) - 2))
+            external_sigmas = full_grid[split:]
+            refine_steps = len(external_sigmas) - 1
+        elif entry < 0.999:
             # entry IS the entrance sigma: an absolute linear ramp entry -> 0.
             # The T8 "BasicScheduler(simple, N, denoise d)" tail mapping is
             # grid-dependent — on the pika shift-12 grid a "denoise 0.30" tail
@@ -1721,7 +1761,74 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
         cache_manifest = bundle_mod.load_manifest(bundle_dir) or {}
         second_entries = cache_manifest.get(bundle_mod.PASS_SECOND) or {}
 
+    _t_film = time.perf_counter()
+
+    # ── 阶段A：单次 TE 常驻，预构建全部镜头条件 ─────────────────────────────
+    # 旧循环每镜 TE↔DiT 互相挤出（条件构建把 DiT 挤出显存，采样再把它换回来），
+    # 每镜白付一次 20GB+ 级模型重载。两阶段化：TE 只载一次、N 镜条件一次构建
+    # 完，再进入纯采样阶段（DiT 载入后不再被 TE 挤出）。预构建的 bundle 是本
+    # 函数局部变量——任务结束即释放，不存在跨任务缓存。
+    prebuilt = {}
+    anchor_hits = {}
+    anchor_keys = {}
+    cond_times = {}
+    _t_pre = time.perf_counter()
+    if clip_obj is None:
+        clip_obj = _load_clip(plan)
     for index in range(start, end + 1):
+        entry_a = entries[index - start]
+        seg_seed_a = int(seed) if seed_policy == "fixed" else int(seed) + index
+        if cache_on and carry_source == "anchor":
+            # anchor 的 carry 哈希恒为 "anchor"，命中可在预构建前判定并跳过
+            # 条件构建；chained/hybrid 的键依赖上一镜输出，只能在采样阶段判定
+            #（届时该镜的预构建可能白做——接受，正确性不受影响）。
+            v0a, vta = int(entry_a["video_offset"]), int(entry_a["video_tokens"])
+            a0a, ata = int(entry_a["audio_offset"]), int(entry_a["audio_steps"])
+            sv_a = video[..., v0a:v0a + vta, :, :]
+            sa_a = audio[..., a0a:a0a + ata]
+            spec_a = bundle_mod.spec_hash(
+                plan, index, seg_seed_a,
+                {"base_steps": int(base_steps), "coarse_steps": int(coarse_steps),
+                 "sampler_name": sampler_name, "scheduler": DEFAULT_SCHEDULER_NAME,
+                 "refine_entry_sigma": float(refine_entry_sigma),
+                 "refine_schedule": refine_schedule,
+                 "context_noise": float(context_noise),
+                 "carry_source": carry_source, "audio_policy": audio_policy,
+                 "shift_video": float(shift_video), "shift_audio": float(shift_audio)},
+                bundle_mod.PASS_SECOND,
+            ) + ":" + bundle_mod.pair_hash(sv_a, sa_a)
+            key_a = bundle_mod.key_of(spec_a, "anchor")
+            anchor_keys[index] = (key_a, spec_a)
+            centry_a = second_entries.get(str(index)) or {}
+            if centry_a.get("key") == key_a:
+                cached_a = bundle_mod.load_segment(bundle_dir, bundle_mod.PASS_SECOND, index)
+                if cached_a is not None:
+                    anchor_hits[index] = cached_a
+                    if logging.getLogger().isEnabledFor(logging.INFO):
+                        logging.info("[LKH3] 二跑缓存命中：镜头%d（键 %s…，预构建前判定）", index + 1, key_a[:8])
+                    continue
+        tb = time.perf_counter()
+        bundle = build_segment_bundle(
+            plan, index, first_frame_override=None, clip=clip_obj,
+            connected=(plan.get("connected_by_segment") or {}).get(index + 1),
+        )
+        bundle["av_latent"].pop("samples", None)
+        prebuilt[index] = bundle
+        cond_times[index] = time.perf_counter() - tb
+        if logging.getLogger().isEnabledFor(logging.INFO):
+            logging.info("[LKH3] 二跑预构建镜头%d 条件=%.1fs", index + 1, cond_times[index])
+    if release_clip and clip_obj is not None:
+        _release_clip(plan, clip_obj)
+        clip_obj = None
+    if logging.getLogger().isEnabledFor(logging.INFO):
+        logging.info(
+            "[LKH3] 二跑预构建完成: %d 镜构建 + %d 镜命中 耗时=%.1fs —— 采样阶段 TE 不再载入",
+            len(prebuilt), len(anchor_hits), time.perf_counter() - _t_pre,
+        )
+
+    # ── 阶段B：纯采样（DiT 常驻，无 TE 载入打断）────────────────────────────
+    for index in range(start, end + 1):
+        t_shot = time.perf_counter()
         entry = entries[index - start]
         v0, vt = int(entry["video_offset"]), int(entry["video_tokens"])
         a0, at = int(entry["audio_offset"]), int(entry["audio_steps"])
@@ -1732,88 +1839,72 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
         # full-film seeds; policy is hardcoded "fixed" today, so this branch
         # is consistency-only).
         seg_seed = int(seed) if seed_policy == "fixed" else int(seed) + index
+        t_cond = cond_times.get(index, 0.0)
 
-        # 二跑分段缓存：键含一跑本段切片 hash（anchor 模式下段间独立——一跑
-        # 没变则逐段命中）与全部精修参数；chained 模式额外链上一段精修输出。
-        # pair_hash 在 cache_on 之内：未启用束时零额外开销。
-        hit = False
+        # 阶段A判定的 anchor 命中：直接回填缓存段（零采样）。
+        if index in anchor_hits:
+            cached_a = anchor_hits[index]
+            if index == start:
+                first_positive = prebuilt[start]["positive"]
+            if logging.getLogger().isEnabledFor(logging.INFO):
+                logging.info("[LKH3] 精修镜头%d: 缓存命中（预构建前判定，零采样）", index + 1)
+            collected.append({
+                "segment": index + 1,
+                "video": cached_a["video"].detach().to("cpu"),
+                "audio": cached_a["audio"].detach().to("cpu"),
+            })
+            previous_samples = comfy.nested_tensor.NestedTensor(
+                (cached_a["video"], cached_a["audio"])
+            )
+            continue
+
+        bundle = prebuilt[index]
+
+        # chained/hybrid 的缓存键依赖上一镜精修输出——只能在采样阶段判定。
+        # anchor 模式的键已在阶段A判定（anchor_keys），此处复用于保存。
         cache_key = None
         cache_spec = None
         cache_carry = "none"
         if cache_on:
-            cache_carry = (
-                "anchor" if carry_source == "anchor"
-                else (bundle_mod.pair_hash(*previous_samples.unbind())
-                      if previous_samples is not None else "none")
-            )
-            cache_spec = bundle_mod.spec_hash(
-                plan, index, seg_seed,
-                {"base_steps": int(base_steps), "coarse_steps": int(coarse_steps),
-                 "sampler_name": sampler_name, "scheduler": DEFAULT_SCHEDULER_NAME,
-                 "refine_entry_sigma": float(refine_entry_sigma),
-                 "context_noise": float(context_noise),
-                 "carry_source": carry_source, "audio_policy": audio_policy,
-                 "shift_video": float(shift_video), "shift_audio": float(shift_audio)},
-                bundle_mod.PASS_SECOND,
-            ) + ":" + bundle_mod.pair_hash(seg_video, seg_audio)
-            cache_key = bundle_mod.key_of(cache_spec, cache_carry)
-            centry = second_entries.get(str(index)) or {}
-            if centry.get("key") == cache_key:
-                cached = bundle_mod.load_segment(bundle_dir, bundle_mod.PASS_SECOND, index)
-                if cached is not None:
-                    hit = True
-                    if audio_mode is None:
-                        # 命中路径没有 samples dict 可读音频模式——直接取
-                        # plan（窗口 conditioning 的模式本就来自 plan）。
-                        audio_mode = plan.get("audio_mode") or "native"
-                    if logging.getLogger().isEnabledFor(logging.INFO):
-                        logging.info("[LKH3] 二跑缓存命中：镜头%d（键 %s…）", index + 1, cache_key[:8])
-                    if index == start:
-                        # first_positive 契约：起始镜命中也要构建 conditioning。
-                        if clip_obj is None:
-                            clip_obj = _load_clip(plan)
-                        bundle = build_segment_bundle(
-                            plan, index, first_frame_override=None, clip=clip_obj,
-                            connected=(plan.get("connected_by_segment") or {}).get(index + 1),
-                        )
-                        bundle["av_latent"].pop("samples", None)
-                        first_positive = bundle["positive"]
-                        if release_clip and clip_obj is not None:
-                            _release_clip(plan, clip_obj)
-                            clip_obj = None
-                    collected.append({
-                        "segment": index + 1,
-                        "video": cached["video"].detach().to("cpu"),
-                        "audio": cached["audio"].detach().to("cpu"),
-                    })
-                    # chained 模式的下游续接：裁剪后的输出尾部与整跑等价。
-                    previous_samples = comfy.nested_tensor.NestedTensor(
-                        (cached["video"], cached["audio"])
-                    )
-                    continue
-            elif logging.getLogger().isEnabledFor(logging.INFO):
-                logging.info(
-                    "[LKH3] 二跑缓存未命中：镜头%d（%s）", index + 1,
-                    bundle_mod.miss_reason(
-                        cache_manifest, bundle_mod.PASS_SECOND, index,
-                        cache_key, cache_spec, cache_carry,
-                    ),
+            if carry_source == "anchor":
+                cache_carry = "anchor"
+                cache_key, cache_spec = anchor_keys[index]
+            else:
+                cache_carry = (
+                    bundle_mod.pair_hash(*previous_samples.unbind())
+                    if previous_samples is not None else "none"
                 )
-
-        if clip_obj is None:
-            clip_obj = _load_clip(plan)
-        bundle = build_segment_bundle(
-            plan, index, first_frame_override=None, clip=clip_obj,
-            connected=(plan.get("connected_by_segment") or {}).get(index + 1),
-        )
-        bundle["av_latent"].pop("samples", None)
-        if release_clip and clip_obj is not None:
-            # Historical cycle: release right after this window's build; the
-            # next window reloads.
-            _release_clip(plan, clip_obj)
-            clip_obj = None
+                cache_spec = bundle_mod.spec_hash(
+                    plan, index, seg_seed,
+                    {"base_steps": int(base_steps), "coarse_steps": int(coarse_steps),
+                     "sampler_name": sampler_name, "scheduler": DEFAULT_SCHEDULER_NAME,
+                     "refine_entry_sigma": float(refine_entry_sigma),
+                     "refine_schedule": refine_schedule,
+                     "context_noise": float(context_noise),
+                     "carry_source": carry_source, "audio_policy": audio_policy,
+                     "shift_video": float(shift_video), "shift_audio": float(shift_audio)},
+                    bundle_mod.PASS_SECOND,
+                ) + ":" + bundle_mod.pair_hash(seg_video, seg_audio)
+                cache_key = bundle_mod.key_of(cache_spec, cache_carry)
+                centry = second_entries.get(str(index)) or {}
+                if centry.get("key") == cache_key:
+                    cached = bundle_mod.load_segment(bundle_dir, bundle_mod.PASS_SECOND, index)
+                    if cached is not None:
+                        if logging.getLogger().isEnabledFor(logging.INFO):
+                            logging.info("[LKH3] 二跑缓存命中：镜头%d（键 %s…）", index + 1, cache_key[:8])
+                        collected.append({
+                            "segment": index + 1,
+                            "video": cached["video"].detach().to("cpu"),
+                            "audio": cached["audio"].detach().to("cpu"),
+                        })
+                        # chained 模式的下游续接：裁剪后的输出尾部与整跑等价。
+                        previous_samples = comfy.nested_tensor.NestedTensor(
+                            (cached["video"], cached["audio"])
+                        )
+                        continue
         if index == start:
             first_positive = bundle["positive"]
+        _t_samp = time.perf_counter()
 
         # Swap the template's samples for this shot's slice of the upscaled
         # film; the template's metadata (audio mode, keyframe bookkeeping)
@@ -1878,6 +1969,38 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
             if tokens > 0:
                 head_video = prev_video[..., -tokens:, :, :]
                 head_audio = prev_audio[..., -audio_steps:] if audio_steps > 0 else None
+        elif carry_source == "hybrid" and index > start and previous_samples is not None:
+            # Both heads describe the SAME film region (the previous shot's
+            # tail): anchor = the upscaled pass-1 latent (fixed quality, no
+            # hop drift), chained = the previous REFINED output (seam
+            # continuity).  Convex blend keeps partial continuity while
+            # bounding generational drift to blend**N over the film
+            # (blend=1.0 -> pure chained, 0.0 -> pure anchor).
+            prev_entry = entries[index - 1 - start]
+            tokens = min(CARRY_TOKENS, int(prev_entry["video_tokens"]))
+            audio_steps = min(CARRY_AUDIO_STEPS, int(prev_entry["audio_steps"]))
+            if tokens > 0:
+                pv0, pvt = int(prev_entry["video_offset"]), int(prev_entry["video_tokens"])
+                pa0, pat = int(prev_entry["audio_offset"]), int(prev_entry["audio_steps"])
+                anchor_v = video[..., pv0 + pvt - tokens:pv0 + pvt, :, :].to(seg_video)
+                anchor_a = (
+                    audio[..., pa0 + pat - audio_steps:pa0 + pat].to(seg_audio)
+                    if audio_steps > 0 else None
+                )
+                prev_video, prev_audio = previous_samples.unbind()
+                chain_v = prev_video[..., -tokens:, :, :].to(seg_video)
+                chain_a = (
+                    prev_audio[..., -audio_steps:].to(seg_audio)
+                    if audio_steps > 0 else None
+                )
+                _b = float(carry_blend)
+                head_video = _b * chain_v + (1.0 - _b) * anchor_v
+                if anchor_a is not None and chain_a is not None:
+                    head_audio = _b * chain_a + (1.0 - _b) * anchor_a
+                elif chain_a is not None:
+                    head_audio = chain_a
+                else:
+                    head_audio = anchor_a
         if head_video is not None:
             window_video = torch.cat([head_video.to(seg_video), seg_video], dim=2)
             window_audio = (
@@ -1950,6 +2073,12 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
             schedule_tag=f"(二跑窗口{index + 1})",
         )
         out_video, out_audio = nested_av_parts(samples)
+        if logging.getLogger().isEnabledFor(logging.INFO):
+            _now = time.perf_counter()
+            logging.info(
+                "[LKH3] 精修镜头%d 耗时: 采样=%.1fs 本镜=%.1fs 二采累计=%.1fs（条件在预构建阶段已计）",
+                index + 1, _now - _t_samp, _now - t_shot, _now - _t_film,
+            )
         if audio_mode is None:
             audio_mode = samples.get("gh_h3_audio_mode") or plan.get("audio_mode") or "native"
         if carry_t > 0:
@@ -2112,6 +2241,11 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
                     optional=True,
                     tooltip="精修入口 σ（绝对值，精确生效）：调度从该 σ 线性降到 0。0.30 恰落在 pika 官方网格的低噪区（~0.333），是蒸馏/加速 LoRA 窗口内的轻度润色；调高到 0.5+ 开始改写纹理，1.0 = 旧截断调度（接近全量重生成，会冲掉参考身份）。噪声来自全片共享的全局噪声场按位置切片，邻镜重建相互关联。",
                 ),
+                io.Combo.Input(
+                    "refine_schedule", options=["native_tail", "absolute_linear"],
+                    default="native_tail",
+                    tooltip="native_tail = T8 验收配方（Published LBH 9/4/5）：与一跑同一份网格从 coarse_steps 截断的尾部，精修全程在蒸馏 LoRA 训练网格上，入口 σ 由 coarse_steps 决定（忽略 refine_entry_sigma）。absolute_linear = 旧入口 σ 线性均分（用 refine_entry_sigma）。",
+                ),
                 io.Custom(RUNTIME_TYPE).Input(
                     "runtime", optional=True, display_name="解码设置",
                     tooltip="CLIP + 视频/音频 VAE 捆绑 — 从 长视频编排 的 解码设置 连一根线即可。未连接时按模型设置名字加载。",
@@ -2142,7 +2276,7 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
                 base_steps, coarse_steps, sampler_name, audio_policy,
                 release_clip=True, free_between_segments=True,
                 carry_source="anchor", context_noise=0.15,
-                refine_entry_sigma=0.30,
+                refine_entry_sigma=0.30, refine_schedule="native_tail",
                 runtime=None, noise=None):
         clip, video_vae, audio_vae = runtime_parts(runtime)
         return io.NodeOutput(*run_refine_segments(
@@ -2154,6 +2288,7 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
             release_clip=release_clip, free_between_segments=free_between_segments,
             audio_policy=audio_policy, carry_source=carry_source,
             context_noise=context_noise, refine_entry_sigma=refine_entry_sigma,
+            refine_schedule=refine_schedule,
             clip=clip, video_vae=video_vae, audio_vae=audio_vae,
             external_sigmas=None, external_noise=noise, external_sampler=None,
         ))
