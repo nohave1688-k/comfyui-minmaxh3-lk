@@ -20,10 +20,6 @@ Node roster:
   forward runs per shot (temporal chunking with context heads), so the VRAM
   peak stays O(one shot) no matter how many shots the film has.
 * LKH3AVDecode — decodes the packed AV latent back to frames + audio.
-* LKH3AVDiskDecode — decodes the packed AV latent straight to disk through
-  the VAE's own temporal chunk protocol (RAM bounded to one decoded chunk,
-  per-segment H.264 encodes pipelined beside the GPU), then a concat
-  stream-copy merge into one MP4.
 
 The plan socket type is LANXI_H3_SEGMENTS on purpose: plans stay
 interchangeable with the predecessor pack's long-video samplers.
@@ -43,7 +39,7 @@ from .gh import sampling as _gh_sampling
 from .gh import audio_ops as _gh_audio_ops
 from .gh import prompt_optimizer as _gh_prompt_optimizer  # noqa: F401  (registers prompt-optimizer routes)
 
-__version__ = "1.3.0"
+__version__ = "2.0.0"
 
 NODE_CLASS_MAPPINGS = {
     "LKH3Shot": _gh_nodes.MiniMaxH3ShotGH,
@@ -51,7 +47,6 @@ NODE_CLASS_MAPPINGS = {
     "LKH3AVUpscale": _gh_latent_upscale.MiniMaxH3AVUpscaleGH,
     "LKH3AVLearnedUpscale": _gh_learned_upscale.MiniMaxH3AVLearnedUpscaleGH,
     "LKH3AVDecode": _gh_audio_ops.MiniMaxH3AVDecodeGH,
-    "LKH3AVDiskDecode": _gh_audio_ops.MiniMaxH3AVDiskDecodeGH,
     "LKH3SegmentGuider": _gh_long_video.MiniMaxH3SegmentGuiderGH,
     "LKH3RefineSegments": _gh_long_video.MiniMaxH3RefineSegmentsGH,
     "LKH3Composer": _gh_nodes.MiniMaxH3ComposerGH,
@@ -63,7 +58,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LKH3AVUpscale": "MiniMax-H3 AV潜空间放大（LK）",
     "LKH3AVLearnedUpscale": "MiniMax-H3 AV学习型放大（LK）",
     "LKH3AVDecode": "MiniMax-H3 AV解码（LK）",
-    "LKH3AVDiskDecode": "MiniMax-H3 AV落盘解码（LK）",
     "LKH3SegmentGuider": "MiniMax-H3 分段引导（LK）",
     "LKH3RefineSegments": "MiniMax-H3 二跑分段精修（LK）",
     "LKH3Composer": "MiniMaxH3 长视频编排（LK）",
@@ -98,7 +92,7 @@ _register_loras_route()
 logging.basicConfig(level=logging.INFO)
 logging.info(
     "[LKH3] LK 包 v%s 已加载: %d 个节点（Composer/Shot/ShotGroup/SegmentGuider/RefineSegments/"
-    "AVUpscale/AVLearnedUpscale/AVDecode/AVDiskDecode）",
+    "AVUpscale/AVLearnedUpscale/AVDecode）",
     __version__, len(NODE_CLASS_MAPPINGS),
 )
 

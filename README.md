@@ -1,16 +1,34 @@
 # ComfyUI MiniMax H3 LK (Long Video)
 
-> MiniMax H3 分段多镜头音视频生成插件 —— ComfyUI-MiniMaxH3-lanxi 的重建版。
+> 🎉 **v2.0.0 大版本更新** —— 节点收敛为 8 个，长视频全链路（编排 → 分镜 → 一跑 →
+> 放大 → 二跑 → 解码）在 v14 标准工作流下全链路验证通过。详见[更新日志](#更新日志--changelog)。
+
+> MiniMax H3 分段多镜头音视频生成插件 —— 基于 T8 与 lanxi 两位大佬的开源成果重建、
+> 优化并整合的长视频一体化包。
 >
 > T8 式两跑高清化：分段引导一采（T8 原语分解）→ 潜空间放大 → 二跑分段精修，
 > 全程打包 AV 潜空间（视频+音频联合生成、联合解码）。
 
+## 🙏 致谢 / Credits
+
+本包站在两位大佬的肩膀上，没有他们的开源就没有这个 LK 包：
+
+- **T8 大佬** — [comfyui-minimax-h3-audio-T8](https://github.com/T8mars/comfyui-minimax-h3-audio-T8)
+  ：本包的**两跑高清化配方、原语分解式一跑（GUIDER + SamplerCustomAdvanced）、
+  精修入口去噪参数**均对齐 T8 的开源实现与发布参数。
+- **lanxi 大佬** — [ComfyUI-MiniMaxH3-lanxi](https://github.com/Yuishi1/ComfyUI-MiniMaxH3-lanxi)
+  ：本包的前身。**分段计划契约（`LANXI_H3_SEGMENTS`）、长视频分段采样器形态、
+  打包 AV 潜空间思想**承自 lanxi 包，计划结构与其长视频采样器互通。
+
 **English intro:** Segmented multi-shot **audio+video** generation for the MiniMax H3
 hybrid Ref2VA model. One-stop film composer (whole-film prompt + per-shot LoRA
 panels) → segmented first pass → packed AV-latent upscale → per-shot second-pass
-refine → joint audio-video decode. 9 nodes. Full docs below are in Chinese.
+refine → joint audio-video decode. 8 nodes. Built on the foundations of
+[T8's comfyui-minimax-h3-audio-T8](https://github.com/T8mars/comfyui-minimax-h3-audio-T8)
+and [lanxi's ComfyUI-MiniMaxH3-lanxi](https://github.com/Yuishi1/ComfyUI-MiniMaxH3-lanxi) —
+huge thanks to both. Full docs below are in Chinese.
 
-## 节点总览（9 个）
+## 节点总览（8 个）
 
 | 节点 | 显示名 | 角色 |
 |---|---|---|
@@ -22,7 +40,6 @@ refine → joint audio-video decode. 9 nodes. Full docs below are in Chinese.
 | `LKH3AVUpscale` | MiniMax-H3 AV潜空间放大（LK） | 打包 AV 潜空间的空间放大（只插值视频部分） |
 | `LKH3AVLearnedUpscale` | MiniMax-H3 AV学习型放大（LK） | 用 H3 放大检查点做 T8 dense 前向（相位校正栅格，连续倍率可用）；前向默认按分镜边界分批，显存峰值 O(单镜)，长片不随分镜数上涨（`前向分批=整片一次` 可回旧行为） |
 | `LKH3AVDecode` | MiniMax-H3 AV解码（LK） | 打包 AV 潜空间 → 帧 + 音频（按消费点解码） |
-| `LKH3AVDiskDecode` | MiniMax-H3 AV落盘解码（LK） | 落盘出片：按模型自身时间分块协议逐块解码（内存有界） + 分段 H.264 流水线编码 → stream-copy 拼接整片 MP4 |
 
 分类统一在 `LK/MiniMax H3 Integration`；分段计划插座类型为 `LANXI_H3_SEGMENTS`
 （刻意沿用旧名：计划结构与 lanxi 前身包的长视频采样器互通）。
@@ -30,12 +47,12 @@ refine → joint audio-video decode. 9 nodes. Full docs below are in Chinese.
 ## 标准工作流（一跑，T8 原语分解）
 
 ```
-LKH3Shot ×1-8 ─shot─▶ LKH3Composer ─segments────────▶ LKH3SegmentGuider ─GUIDER┐
-                             │           ├─空白AV模板─▶ SamplerCustomAdvanced ◀─SIGMAS┤
-                             │           │                ▲noise（RandomNoise 原语） │
-                             │           └─CLIP/VAE────▶ （按需连给引导/精修/解码）    ─SAMPLER┘
-                             │
-                             └─ SamplerCustomAdvanced 输出 LATENT ─▶ LKH3AVDecode ─▶ 图像 + 音频
+LKH3Shot / LKH3ShotGroup ×N ─分镜序列─▶ LKH3Composer ─segments──────▶ LKH3SegmentGuider ─GUIDER┐
+                                    │           ├─空白AV模板─▶ SamplerCustomAdvanced ◀─SIGMAS┤
+                                    │           │                ▲noise（RandomNoise 原语）  │
+                                    │           └─CLIP/VAE────▶ （按需连给引导/精修/解码）    ─SAMPLER┘
+                                    │
+                                    └─ LATENT ─▶ LKH3AVDecode ─▶ 图像 + 音频 ─▶ 保存视频
 ```
 
 - **LKH3Composer**：`film_prompt` 拼到每个镜头提示词前（主体定义/风格块/`<图片n>` 标签）；
@@ -43,9 +60,10 @@ LKH3Shot ×1-8 ─shot─▶ LKH3Composer ─segments────────▶
   native）管音频来源；`latent_continue` 开关段间潜空间续接；`range_start/end` 选跑哪些镜头。
   输出的 **空白AV模板**（含 `lk_layout` 布局）直接接 SamplerCustomAdvanced 的 `latent_image`，
   不再需要独立的模板/断环节点。
-- **LKH3Shot**：时长 2-30s（自动对齐 17n+5 帧网格）；参考媒体走原生连线插座
+- **LKH3Shot / LKH3ShotGroup**：时长 2-30s（自动对齐 17n+5 帧网格）；参考媒体走原生连线插座
   （首/尾帧、参考图×6、参考视频×2、参考音频×3）；LoRA 行由前端面板管理
-  （序列化在 `shot_json`）。
+  （序列化在 `shot_json`）。分镜组把 ≤3 镜装进一个节点（分镜 2/3 面板编辑 +
+  默认继承主分镜参考），组链首尾相接解除 8 镜上限。
 - **LKH3SegmentGuider**：把 SamplerCustomAdvanced 拆出的原语组合成分段循环——
   逐镜条件化 + 逐镜 LoRA + 潜空间续接（上一镜尾部 7 latent token / 22 帧）。
   SAMPLER/SIGMAS 由本节点从同一份 steps/shifts 配方生成（单一事实来源，无独立契约节点）。
@@ -54,8 +72,8 @@ LKH3Shot ×1-8 ─shot─▶ LKH3Composer ─segments────────▶
 ## 高清化工作流（二跑）
 
 ```
-一跑 LATENT ─▶ LKH3AVUpscale（scale_by 2.0 → ~1080p）─▶ LKH3RefineSegments ─▶ LKH3AVDecode ─▶ 高清成片
-                                                            ▲ segments/CLIP/VAE 从 LKH3Composer 连线
+一跑 LATENT ─▶ LKH3AVUpscale / LKH3AVLearnedUpscale（→ ~1080p）─▶ LKH3RefineSegments ─▶ LKH3AVDecode ─▶ 高清成片
+                                                                     ▲ segments/CLIP/VAE 从 LKH3Composer 连线
 ```
 
 - **LKH3AVUpscale**：只对视频部分做空间插值（nearest-exact/bilinear/area/bicubic/lanczos，
@@ -64,8 +82,8 @@ LKH3Shot ×1-8 ─shot─▶ LKH3Composer ─segments────────▶
   放大后显存吃紧）可改用 **LKH3AVLearnedUpscale**：H3 放大检查点的 dense 前向，
   时间维按分镜分批，显存峰值 O(单镜)；两者的 latent 输出可直接互换接入二跑
   （学习型放大额外多 width/height/report_json 三个信息输出口；`lk_layout.video_hw`
-  由学习型放大维护，插值节点原样透传）。二跑解码阶段长片建议改接
-  **LKH3AVDiskDecode**（逐段流式出片，内存有界）。
+  由学习型放大维护，插值节点原样透传）。二跑解码阶段直接接
+  **LKH3AVDecode**（注意：整片解码内存随片长线性增长，约 151MB/秒）。
 - **LKH3RefineSegments**：逐镜切片精修，条件化按**放大后的画布**重建（参考图 HD 重编码，
   等价 T8 的 HIGH-conditioning）。精修调度为**入口 σ 线性降到 0**：`refine_entry_sigma`
   就是精确的入口去噪量（默认 0.30，落在 pika 官方网格低噪区；1.0 = 旧截断调度全量重生成），
@@ -133,9 +151,9 @@ LKH3Shot ×1-8 ─shot─▶ LKH3Composer ─segments────────▶
 
 | | lanxi（旧） | 本包 |
 |---|---|---|
-| 节点 | 7 个已注册 + 16 个未注册 RefMod | **9 个**（编排/分镜/分镜组/引导/精修/放大×2/解码×2；RefMod 子系统已移除） |
+| 节点 | 7 个已注册 + 16 个未注册 RefMod | **8 个**（编排/分镜/分镜组/引导/精修/放大×2/解码；RefMod 子系统已移除） |
 | 一跑形态 | 适配器 + 一体化采样器 | T8 原语分解（GUIDER + SamplerCustomAdvanced） |
-| 二跑形态 | 二采分块采样器 + Latent 上采样器 | `LKH3AVUpscale` + `LKH3RefineSegments` |
+| 二跑形态 | 二采分块采样器 + Latent 上采样器 | `LKH3AVUpscale` / `LKH3AVLearnedUpscale` + `LKH3RefineSegments` |
 | 注册方式 | V1 双轨 + comfy_entrypoint | 纯 `NODE_CLASS_MAPPINGS`（V3 类原生执行） |
 | 节点 ID | `LanxiH3Studio` 等 | `LKH3*`（可共存） |
 | 计划插座 | `LANXI_H3_SEGMENTS` | 同名同构，**计划可互换** |
@@ -176,11 +194,13 @@ pip install -r ComfyUI/custom_nodes/comfyui-minmaxh3-lk/requirements.txt
 
 - 节点定义只来自安装的代码：**git 更新 → 重启 ComfyUI → 浏览器 Ctrl+F5**，三步完成升级，
   所有工作流的节点定义随之刷新；工作流文件只保存连线与控件数值
+- **v2.0.0 移除了 `LKH3AVDiskDecode`**（流式落盘解码，v1.2.0–v1.x 期间短暂存在）：
+  打开含这个节点的旧工作流会提示节点缺失——解码统一改接 `LKH3AVDecode` 即可，
+  连线与参数无需其他改动（长片解码注意整片内存 ~151MB/秒）
 - v1.3.0 移除了 `LKH3ReferenceFocus`：打开含这个节点的旧工作流会提示节点缺失——
-  参考照片直接接入分镜的参考插座即可。`LKH3AVDiskDecode` 在包内注册可用
-  （长片流式出片推荐路径），无需改线
+  参考照片直接接入分镜的参考插座即可
 - v1.2.0 起二跑精修的 `放大模型`/`放大倍率`（内部学习型放大）已移除——放大统一走
-  外接放大节点（当时为 `LKH3AVUpscale` 插值；v1.3.0 起另有 `LKH3AVLearnedUpscale`
+  外接放大节点（`LKH3AVUpscale` 插值；v1.3.0 起另有 `LKH3AVLearnedUpscale`
   检查点 dense 前向可选）。
   **打开旧工作流若见 `续接头重加噪 = NaN` 或 `精修去噪强度 = 1.00`，
   说明该画布是旧槽位时代的存档**：重新从放大节点连线、或对照 V14 模板核对精修控件值
@@ -190,17 +210,29 @@ pip install -r ComfyUI/custom_nodes/comfyui-minmaxh3-lk/requirements.txt
 
 ## 更新日志 / Changelog
 
+**v2.0.0（大版本更新）**
+
+- **节点收敛为 8 个**：移除短暂回归的 `LKH3AVDiskDecode`（流式落盘解码）——
+  解码统一走 `LKH3AVDecode`（v14 标准工作流口径，全链路实测验证）
+- **RefMod 子系统彻底移除**（16 个未注册节点 + reference_tools，约 5000 行）：
+  参考照片直接接入分镜的参考插座，包结构大幅瘦身
+- **新增 `LKH3ShotGroup` 分镜组**：≤3 镜一组，分镜 2/3 面板编辑 + 默认继承主分镜
+  参考，组链首尾相接解除 8 镜上限；与逐镜缓存/逐镜 audio_mode 自动兼容
+- **新增 `LKH3AVLearnedUpscale` 学习型放大**：H3 放大检查点 dense 前向（相位校正
+  栅格，连续倍率可用），时间维按分镜分批，显存峰值 O(单镜)；附测试套件
+- **新增锐度锚**：每镜采样后解码末帧作下一镜附加参考，阻断长片逐镜向软漂移
+  （photocopy 效应，实测把劣化起点从 ~30s 推到 40s+）
+- **项目束缓存系统**：逐镜性能缓存全自动（改哪镜只重跑哪镜、缓存键递归含内容
+  hash、超限 `LK_BUNDLE_CACHE_GB` 整束自动清理）
+- **前端面板大改**：分镜组支持、全局编号引擎修复、参考媒体与 LoRA 行对齐后端
+  展平口径；中英 locale 全面同步
+- 新增测试：学习型放大套件（`tests/test_learned_upscale.py`）
+
 **v1.3.0**
 
-- 新增 `LKH3AVLearnedUpscale`：H3 放大检查点的 dense 前向（相位校正栅格，连续倍率可用），
-  时间维默认**按分镜分批**（每窗至多 8 帧上下文头），显存峰值 O(单镜)，长片不再随分镜数 OOM；
-  `前向分批=整片一次` 保留旧行为供 A/B 对照
 - 项目束退化为**纯逐镜性能缓存**：目录自动生成（`output/LK_H3_projects/`，
   「项目目录」留空即用），束内容全部可再生；移除复现说明/参考媒体副本/
   「接回」入口（复现工作流放弃，接回按钮与弹窗已删）
-- 缓存全自动清理：`LK_BUNDLE_CACHE_GB`（默认 16GB，0=关）超限最旧优先
-  **整束删除**；`LK_BUNDLE_CACHE_DAYS` 按最后活动时间清理（默认 0 = 关）；
-  `LK_SEGMENT_CACHE=0` 完全关闭缓存（不建目录）
 - `LKH3ReferenceFocus`（参考聚焦）移除：参考照片直接接分镜的参考插座
 - 前端：全局编号引擎修复（直接接编排的组误判「未接编排」）+ 分镜卡编号
   对齐后端展平口径（空主镜不占号）
@@ -209,6 +241,7 @@ pip install -r ComfyUI/custom_nodes/comfyui-minmaxh3-lk/requirements.txt
 **v1.2.0**
 
 - 新增 `LKH3AVDiskDecode`：逐段解码 + ffmpeg 增量编码，长片不再撞整片解码的内存墙
+  （v2.0.0 起移除，解码统一走 `LKH3AVDecode`）
 - 二跑精修移除内部学习型放大——放大统一走 `LKH3AVUpscale` 外接节点
 - `release_clip` 默认改为 **false**：int8 量化 32B 文本编码器卸载后热重载会退化参考嵌入
   （首轮正常、后续排队参考丢失，实测复现）
@@ -225,9 +258,10 @@ pip install -r ComfyUI/custom_nodes/comfyui-minmaxh3-lk/requirements.txt
 ## 结构
 
 ```
-gh/            引擎（编排/分镜、条件化、双时钟采样、预构建循环、精修、AV解码、提示词优化）
-web/js/        统一前端面板（分镜 LoRA 行、参考媒体、提示词优化器）
+gh/            引擎（编排/分镜、条件化、双时钟采样、预构建循环、精修、AV解码、提示词优化、项目束、学习型放大）
+web/js/        统一前端面板（分镜组 LoRA 行、参考媒体、提示词优化器）
 locales/       中英文翻译（nodeDefs.json 按节点/输入名组织）
+tests/         测试（学习型放大等）
 ```
 
 ## API 路由
@@ -249,8 +283,13 @@ locales/       中英文翻译（nodeDefs.json 按节点/输入名组织）
 
 ## 致谢 / Credits
 
-- 前身包 ComfyUI-MiniMaxH3-lanxi 的分段计划契约（`LANXI_H3_SEGMENTS`）与
-- 两跑高清化精修配方对齐 T8 发布参数（simple 调度、入口去噪 0.30）
+- **[T8mars / comfyui-minimax-h3-audio-T8](https://github.com/T8mars/comfyui-minimax-h3-audio-T8)**：
+  两跑高清化配方、原语分解式一跑形态、精修入口去噪参数的出处
+- **[Yuishi1 / ComfyUI-MiniMaxH3-lanxi](https://github.com/Yuishi1/ComfyUI-MiniMaxH3-lanxi)**：
+  本包的前身——分段计划契约（`LANXI_H3_SEGMENTS`）、长视频分段采样器形态、
+  打包 AV 潜空间思想的出处
+
+再次向两位开源大佬致谢：**LK 包是在你们的工作基础上促成的。**
 
 ## 许可证 / License
 

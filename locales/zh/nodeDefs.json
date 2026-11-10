@@ -424,37 +424,5 @@
         "tooltip": "CLIP + 视频 VAE + 音频 VAE 捆绑 — 一根线接本包 分段引导/二跑分段精修/AV 解码 的 解码设置 输入。"
       }
     }
-  },
-  "LKH3AVDiskDecode": {
-    "display_name": "MiniMax-H3 AV落盘解码（LK）",
-    "description": "把打包 AV 潜空间按模型自身时间分块协议逐块解码并直写磁盘：内存以单个解码块为界（长片不撞内存墙），分段 H.264 编码与 GPU 解码流水线并行，最终 stream-copy 拼接整片 MP4。",
-    "inputs": {
-      "av_latent": {
-        "name": "AV 潜空间",
-        "tooltip": "长视频分段采样（或二跑精修）输出的打包 AV 潜空间，需携带 lk_layout。"
-      },
-      "runtime": {
-        "name": "解码设置",
-        "tooltip": "CLIP + 视频/音频 VAE 捆绑 — 从 长视频编排 的 解码设置 连一根线。"
-      },
-      "filename_prefix": {
-        "name": "文件名前缀",
-        "tooltip": "输出文件名前缀，可含子目录（如 LK_H3/MiniMaxH3），遵循 ComfyUI 计数命名。"
-      },
-      "crf": {
-        "name": "CRF 质量",
-        "tooltip": "H.264 质量（越低画质越好、文件越大），0 为无损。"
-      },
-      "keep_segments": {
-        "name": "保留分段",
-        "tooltip": "保留逐段编码的临时 mp4 与 concat 列表（排查接缝问题时打开）。"
-      }
-    },
-    "outputs": {
-      "0": {
-        "name": "视频",
-        "tooltip": "落盘完成的整片 MP4。文件已写入输出目录且节点自带预览；此输出口只给需要视频对象的下游（再接 保存视频 会二次转码，没必要）。"
-      }
-    }
   }
 }

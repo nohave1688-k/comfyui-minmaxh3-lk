@@ -418,37 +418,5 @@
         "tooltip": "CLIP + 视频 VAE + 音频 VAE 捆绑 — 一根线接本包 分段引导/二跑分段精修/AV 解码 的 解码设置 输入。"
       }
     }
-  },
-  "LKH3AVDiskDecode": {
-    "display_name": "MiniMax-H3 AV Disk Decode (LK)",
-    "description": "Decodes the packed AV latent chunk-by-chunk through the model's own temporal chunk protocol straight to disk: memory bounded to one decoded chunk (no film-length ceiling), per-segment H.264 encodes pipelined beside the GPU, assembled into one MP4 via stream-copy concat.",
-    "inputs": {
-      "av_latent": {
-        "name": "AV Latent",
-        "tooltip": "Packed AV latent from segmented sampling (or the refine pass); must carry lk_layout."
-      },
-      "runtime": {
-        "name": "Decode Settings",
-        "tooltip": "CLIP + video/audio VAE bundle — connect from the composer's 解码设置 output."
-      },
-      "filename_prefix": {
-        "name": "Filename Prefix",
-        "tooltip": "Output filename prefix, may include a subfolder (e.g. LK_H3/MiniMaxH3); follows ComfyUI counter naming."
-      },
-      "crf": {
-        "name": "CRF Quality",
-        "tooltip": "H.264 quality (lower = better quality, larger file); 0 = lossless."
-      },
-      "keep_segments": {
-        "name": "Keep Segments",
-        "tooltip": "Keep the per-segment mp4 files and the concat list (for debugging chunk joins)."
-      }
-    },
-    "outputs": {
-      "0": {
-        "name": "Video",
-        "tooltip": "The finished MP4. Written to the output directory with a preview; only feed this to downstream nodes that need a video object (saving it again would re-encode)."
-      }
-    }
   }
 }
