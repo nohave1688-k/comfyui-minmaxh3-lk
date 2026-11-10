@@ -34,6 +34,69 @@
       }
     }
   },
+  "LKH3AVLearnedUpscale": {
+    "display_name": "MiniMax-H3 AV学习型放大（LK）",
+    "description": "用 H3 放大检查点做 T8 dense 前向（相位校正栅格，连续倍率可用），目标 = 一跑 latent × scale_by（取偶 → 画布自动 /32）。前向默认按分镜边界分批，显存峰值 O(单镜)，长片不再随分镜数上涨。",
+    "inputs": {
+      "av_latent": {
+        "name": "AV 潜空间",
+        "tooltip": "一跑输出的整条嵌套 AV 潜空间（含 lk_layout）。非嵌套或畸形（非 2-part）的 legacy noise_mask 会被丢弃（debug 日志），不做放大。"
+      },
+      "model_name": {
+        "name": "放大模型",
+        "tooltip": "latent_upscale_models 目录下的 H3 放大检查点。"
+      },
+      "scale_by": {
+        "name": "放大倍数",
+        "tooltip": "目标 = 一跑 latent × 此倍数（尺寸自动取偶 → 画布自动 /32，画幅比例基本保持）。H05 已审倍率 = 1.2；连续倍率均可。"
+      },
+      "precision": {
+        "name": "精度",
+        "options": {
+          "fp16": "fp16",
+          "bf16": "bf16",
+          "fp32": "fp32"
+        }
+      },
+      "release_policy": {
+        "name": "推理后策略",
+        "options": {
+          "offload_after": "推理后回 CPU",
+          "clear_after": "推理后清缓存",
+          "keep_loaded": "常驻显存"
+        },
+        "tooltip": "offload_after = 推理后权重回 CPU（保留缓存）；clear_after = 连缓存一起清；keep_loaded = 常驻显存。"
+      },
+      "chunk_mode": {
+        "name": "前向分批",
+        "options": {
+          "segments": "按分镜",
+          "fixed": "固定窗口",
+          "whole": "整片一次"
+        },
+        "tooltip": "segments = 按 lk_layout 分镜边界逐镜前向（默认，显存峰值 O(单镜)，长片不 OOM，GroupNorm 统计每镜一份更贴训练分布，切缝落在硬切上；布局漂移自动回退固定窗口）；fixed = 固定窗口；whole = 整片一次（旧行为，供短片 A/B 与逐位复现）。"
+      },
+      "chunk_window": {
+        "name": "窗口帧数",
+        "tooltip": "固定窗口模式每窗的潜空间帧数（96 窗 ≈ 324 实帧，仍在检查点训练 clip 长度内）；仅固定窗口模式生效，布局漂移回退时也用它。"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "AV 潜空间",
+        "tooltip": "放大并换算后的嵌套 AV 潜空间（含更新后的 lk_layout）— 接二跑精修的 av_latent。"
+      },
+      "1": {
+        "name": "宽度"
+      },
+      "2": {
+        "name": "高度"
+      },
+      "3": {
+        "name": "报告"
+      }
+    }
+  },
   "LKH3Shot": {
     "display_name": "MiniMaxH3分镜（LK)",
     "description": "长视频的单个分镜：时长、提示词、首尾帧与参考素材连线插座；输出接 MiniMaxH3分镜合成 节点。",
@@ -82,12 +145,16 @@
       },
       "ref_audio_3": {
         "name": "音频 3"
+      },
+      "group_in": {
+        "name": "前序分镜",
+        "tooltip": "接上一个 分镜组/散点分镜 的「分镜序列」输出——本镜排在链尾，直插组链。"
       }
     },
     "outputs": {
       "0": {
-        "name": "shot",
-        "tooltip": "连接到 MiniMaxH3分镜合成 节点的 分镜 1-8 输入。"
+        "name": "分镜序列",
+        "tooltip": "单镜链（值 = 本镜 1 镜的组链）。接 分镜组 的 上游分镜组 或 Composer 的 分镜序列——散点直插组链。"
       }
     }
   },
@@ -112,6 +179,26 @@
       "1": {
         "name": "音频",
         "tooltip": "解码后的音频。"
+      }
+    }
+  },
+  "LKH3ShotGroup": {
+    "display_name": "MiniMaxH3 分镜组（LK）",
+    "description": "一个节点收纳 ≤3 个分镜：分镜1（主）保留全套参考 socket；分镜2/3 在面板内编辑并默认「继承主分镜参考」。输出 = 上游链 + 本组活动分镜；多组首尾相接接 Composer 的「分镜组链」，解除 8 镜上限。项目束缓存自动兼容（展平后同一 plan 通道）。",
+    "inputs": {
+      "group_in": {
+        "name": "前序分镜",
+        "tooltip": "链接上一个分镜组的输出（多组首尾相接）。组链传递顺序与参考上下文：各镜「参考」开关默认「继承」，无自己连线时自动取链上就近声明的参考；提示词/LoRA/音频模式/首尾帧等参数永不跨组。"
+      },
+      "group_json": {
+        "name": "分镜组状态",
+        "tooltip": "面板管理的逐镜状态（提示词/时长/音频模式/LoRA/继承开关），勿手改。"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "分镜序列",
+        "tooltip": "上游链 + 本组活动分镜。接到 Composer 的「分镜序列」口，或下一个分镜组的 上游分镜组。"
       }
     }
   },
@@ -162,6 +249,10 @@
         "options": {
           "native_flow": "双钟默认（shift12/3）"
         }
+      },
+      "sharpness_anchor": {
+        "name": "锐度锚",
+        "tooltip": "锐度锚（长片防软化，实测有效）：每镜采样后解码其末帧，作为下一镜的附加参考图——时间注意力按上一镜真实锐度匹配，阻断逐镜向软漂移。与手动参考并存（占下一个空闲参考槽）。"
       }
     },
     "outputs": {
@@ -215,9 +306,10 @@
       "carry_source": {
         "name": "续接来源",
         "options": {
-          "anchor": "锚定首采（防逐镜复利）",
+          "anchor": "锚定一采（取上一镜尾部，防逐镜复利）",
           "chained": "链式精修（接缝最顺）",
-          "none": "不续接（诊断用）"
+          "none": "不续接（诊断用）",
+          "hybrid": "混合（连续性与防漂移兼顾）"
         }
       },
       "context_noise": {
@@ -246,60 +338,15 @@
         "name": "二采采样器",
         "tooltip": "二采采样器。lcm/标准名 = comfy 原生 FLOW_AV 路由（与一采 pika 官方路由对齐）；dual_clock_euler = 兼容路由。"
       },
-      "upscale_model": {
-        "name": "放大模型",
-        "tooltip": "内部学习型放大模型（comfy 官方 latent_upscale_models 目录）。配合放大倍率 >1 使用。"
-      },
-      "upscale_scale": {
-        "name": "放大倍率",
-        "tooltip": "1.0 = 不放大（输入须为已放大潜空间）；>1 = 先学习型放大再逐镜精修。"
+      "carry_blend": {
+        "name": "续接混合比例",
+        "tooltip": "仅 续接来源=hybrid 生效：续接头 = blend×上一镜精修输出尾部 + (1-blend)×一采放大锚点尾部。1.0 = 纯 chained，0.0 = 纯 anchor，0.5 兼顾。"
       }
     },
     "outputs": {
       "0": {
         "name": "AV 潜空间",
         "tooltip": "整条高清 AV 潜空间（含 lk_layout）— 接 AV解码 出片。"
-      }
-    }
-  },
-  "LKH3ReferenceFocus": {
-    "display_name": "MiniMax-H3 参考聚焦（LK）",
-    "description": "参考照片预处理：人脸检测 → 紧凑身份裁切 → 身份表拼接，作为单个 <Picture n> 打包。检测器为内置 230KB YuNet 模型，任何失败都退化为中心裁切。",
-    "inputs": {
-      "image": {
-        "name": "参考照片"
-      },
-      "mode": {
-        "name": "模式",
-        "options": {
-          "face_sheet": "人脸身份表",
-          "face_main": "主脸特写",
-          "face_pick": "指定第N脸",
-          "center_square": "中心方裁",
-          "passthrough": "原样"
-        }
-      },
-      "faces": {
-        "name": "人脸数上限"
-      },
-      "margin": {
-        "name": "扩边系数"
-      },
-      "cell": {
-        "name": "单元格边长"
-      },
-      "confidence": {
-        "name": "检测置信度"
-      },
-      "face_index": {
-        "name": "指定第几张脸",
-        "tooltip": "face_pick 模式取第几张脸（按人脸面积从大到小排序，1 = 最大的脸）。超出检出数时回落到最大的脸。"
-      }
-    },
-    "outputs": {
-      "0": {
-        "name": "image",
-        "tooltip": "预处理后的参考图 — 接分镜节点的 参考图 插座。"
       }
     }
   },
@@ -341,6 +388,14 @@
       "range_end": {
         "name": "结束镜头",
         "tooltip": "结束镜头。超出已连接分镜数时自动收窄（如激活 4 镜而填 9，自动按 4 执行并写控制台提示）。"
+      },
+      "project_dir": {
+        "name": "项目目录",
+        "tooltip": "逐镜缓存目录（留空 = 自动使用 output/LK_H3_projects/ 下的按片子目录）：按片自动建束，改哪镜只重跑哪镜；束内容全部可再生，超限自动整束清理（LK_BUNDLE_CACHE_GB 默认16GB，0=关；LK_BUNDLE_CACHE_DAYS 按龄，默认关）。LK_SEGMENT_CACHE=0 完全关闭缓存。"
+      },
+      "shot_group_chain": {
+        "name": "分镜序列",
+        "tooltip": "接 分镜组 的「分镜序列」输出（多组首尾相接）。顺序 = 分镜 1-8 之后接链上各组依序展开；解除 8 镜上限。"
       }
     },
     "outputs": {
@@ -367,6 +422,38 @@
       "5": {
         "name": "解码设置",
         "tooltip": "CLIP + 视频 VAE + 音频 VAE 捆绑 — 一根线接本包 分段引导/二跑分段精修/AV 解码 的 解码设置 输入。"
+      }
+    }
+  },
+  "LKH3AVDiskDecode": {
+    "display_name": "MiniMax-H3 AV落盘解码（LK）",
+    "description": "把打包 AV 潜空间按模型自身时间分块协议逐块解码并直写磁盘：内存以单个解码块为界（长片不撞内存墙），分段 H.264 编码与 GPU 解码流水线并行，最终 stream-copy 拼接整片 MP4。",
+    "inputs": {
+      "av_latent": {
+        "name": "AV 潜空间",
+        "tooltip": "长视频分段采样（或二跑精修）输出的打包 AV 潜空间，需携带 lk_layout。"
+      },
+      "runtime": {
+        "name": "解码设置",
+        "tooltip": "CLIP + 视频/音频 VAE 捆绑 — 从 长视频编排 的 解码设置 连一根线。"
+      },
+      "filename_prefix": {
+        "name": "文件名前缀",
+        "tooltip": "输出文件名前缀，可含子目录（如 LK_H3/MiniMaxH3），遵循 ComfyUI 计数命名。"
+      },
+      "crf": {
+        "name": "CRF 质量",
+        "tooltip": "H.264 质量（越低画质越好、文件越大），0 为无损。"
+      },
+      "keep_segments": {
+        "name": "保留分段",
+        "tooltip": "保留逐段编码的临时 mp4 与 concat 列表（排查接缝问题时打开）。"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "视频",
+        "tooltip": "落盘完成的整片 MP4。文件已写入输出目录且节点自带预览；此输出口只给需要视频对象的下游（再接 保存视频 会二次转码，没必要）。"
       }
     }
   }

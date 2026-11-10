@@ -23,7 +23,6 @@ from comfy_extras import nodes_audio
 from .conditioning import build_conditioning
 from .core import RUNTIME_TYPE, align_frame_count_down
 from . import bundle as gh_bundle
-from ..refmod.nodes import load_visual_mods
 from .long_video import (
     MAX_SEGMENTS,
     SEGMENT_TYPE,
@@ -487,25 +486,27 @@ class MiniMaxH3ComposerGH(io.ComfyNode):
                 tooltip="Carry the previous shot's latent tail into the next shot.",
             ),
             io.Int.Input(
-                "range_start", default=1, min=1, max=MAX_SEGMENTS, step=1,
-                tooltip="First shot to run (1-based, in connection order).",
+                "range_start", default=1, min=1, max=256, step=1,
+                tooltip="First shot to run (1-based, in connection order: 链上各镜依序展开)。",
             ),
             io.Int.Input(
-                "range_end", default=1, min=1, max=MAX_SEGMENTS, step=1,
-                tooltip="Last shot to run (inclusive).",
+                "range_end", default=1, min=1, max=256, step=1,
+                tooltip="Last shot to run (inclusive).  超出实际分镜数时自动收窄。",
             ),
+
             io.String.Input(
                 "project_dir", default="", optional=True,
-                tooltip="项目目录：填入一个文件夹路径即启用「项目束」——分段 latent 缓存、参考媒体副本、复现说明与工作流快照都落在里面（推荐指向 output 下的专用子文件夹）。留空 = 完全旧行为。",
+                tooltip="逐镜缓存目录：留空 = 自动使用 output/LK_H3_projects/ 下的按片子目录，按片自动建束（改哪镜只重跑哪镜），超限自动整束清理（LK_BUNDLE_CACHE_GB 默认16GB，0=关；LK_BUNDLE_CACHE_DAYS 按龄，默认关）。也可填自定义路径。LK_SEGMENT_CACHE=0 完全关闭缓存。",
             ),
         ]
-        for i in range(1, MAX_SEGMENTS + 1):
-            schema_inputs.append(io.Custom("LK_H3_SHOT").Input(
-                f"shot_{i}",
-                display_name=f"分镜 {i}",
-                optional=True,
-                tooltip=f"Shot {i} in the running order.",
-            ))
+        # v3 起：散点/组的接入统一走 分镜序列（链式串联），原 分镜 1-8 口
+        # 已移除。旧工作流请改用各节点的 分镜序列 输出串接后接入此口。
+        schema_inputs.append(io.Custom("LK_H3_SHOT_GROUP").Input(
+            "shot_group_chain",
+            display_name="分镜序列",
+            optional=True,
+            tooltip="分镜序列：接 分镜组/散点分镜 的「分镜序列」输出（多节点首尾相接）。顺序 = 链上各镜依序展开，无镜数上限。",
+        ))
         return io.Schema(
             node_id="LKH3Composer",
             display_name="MiniMaxH3 长视频编排（LK）",
@@ -550,15 +551,30 @@ class MiniMaxH3ComposerGH(io.ComfyNode):
     def execute(cls, film_prompt, clip_name, video_vae_name, audio_vae_name,
                 aspect, megapixels, ref_image_size, audio_mode,
                 latent_continue=True, range_start=1, range_end=1,
-                project_dir="", shot_1=None, shot_2=None, shot_3=None, shot_4=None,
-                shot_5=None, shot_6=None, shot_7=None, shot_8=None):
+                project_dir="", shot_group_chain=None):
         # Loaders cache by name — the same objects the samplers would load.
         clip = nodes.CLIPLoader().load_clip(clip_name, "minimax")[0] if clip_name else None
         video_vae = nodes.VAELoader().load_vae(video_vae_name)[0] if video_vae_name else None
         audio_vae = nodes.VAELoader().load_vae(audio_vae_name)[0] if audio_vae_name else None
-        shots = [shot for shot in (shot_1, shot_2, shot_3, shot_4,
-                                   shot_5, shot_6, shot_7, shot_8)
-                 if shot is not None]
+        # 分镜序列展平：链值本身就是有序 shot dict 列表（前序分镜 + 各组
+        # 依序累积），即全片顺序；参考上下文补全在此之后执行。
+        # is_input_list 下 shot_group_chain 是"链的列表"（每条连线一个有序
+        # shot dict 列表）；多分支全部展平，连线顺序即片内顺序。兼容单连线
+        # 旧形态（list of shot dicts）。
+        chain_shots = []
+        if shot_group_chain is not None:
+            if not isinstance(shot_group_chain, list):
+                raise ValueError("分镜序列 输入必须是 分镜组/散点分镜 的「分镜序列」输出。")
+            if any(isinstance(item, list) for item in shot_group_chain):
+                for chain in shot_group_chain:
+                    if isinstance(chain, list):
+                        chain_shots.extend(s for s in chain if isinstance(s, dict))
+            else:
+                chain_shots = [shot for shot in shot_group_chain if isinstance(shot, dict)]
+        shots = [shot for shot in chain_shots if isinstance(shot, dict)]
+        fill_inherited_refs(shots)
+        if shots:
+            logging.info("[LKH3] 分镜序列：全片 %d 镜", len(shots))
         plan = build_plan_from_shot_nodes(
             settings={"clip_name": clip_name, "video_vae_name": video_vae_name,
                       "audio_vae_name": audio_vae_name},
@@ -568,45 +584,32 @@ class MiniMaxH3ComposerGH(io.ComfyNode):
             shots=shots, latent_continue=latent_continue,
             range_start=range_start, range_end=range_end,
             clip=clip, video_vae=video_vae, audio_vae=audio_vae,
+            max_segments=max(MAX_SEGMENTS, len(shots)),
         )
-        # 项目束（opt-in）：填了「项目目录」才启用缓存/参考副本/复现说明；
-        # 留空 = 三个键全 None，下游一切照旧。身份刻意不含逐镜内容——
-        # 改某一镜的提示词不变更束，只有结构变更（模型/画布/镜数）才换束。
+        # 项目束 = 纯逐镜性能缓存：目录留空时自动在 output/LK_H3_projects/
+        # 下按片身份（film_key）开**子束**——多部片各占一个文件夹，互不串
+        # 缓存；束内容全部可再生，sweep 按阈值整束清理。身份刻意不含逐镜
+        # 内容——改某一镜的提示词不变更束，只有结构变更（模型/画布/镜数）
+        # 才换束。LK_SEGMENT_CACHE=0 = 完全关闭（不建目录、不读写缓存）。
         plan["bundle_dir"] = plan["film_key"] = None
         plan["cache_enabled"] = False
-        if (project_dir or "").strip():
+        if os.environ.get("LK_SEGMENT_CACHE", "1") != "0":
             identity = gh_bundle.film_identity(
                 clip_name=clip_name, video_vae_name=video_vae_name,
                 audio_vae_name=audio_vae_name,
                 width=plan["width"], height=plan["height"],
                 segment_count=len(plan["segments"]),
             )
-            resolved = gh_bundle.resolve_bundle(project_dir, identity)
+            bundle_root = (project_dir or "").strip() or os.path.join(
+                folder_paths.get_output_directory(), "LK_H3_projects",
+                gh_bundle.canonical_hash(identity)[:8])
+            resolved = gh_bundle.resolve_bundle(bundle_root, identity)
             if resolved is not None:
-                bundle_dir, manifest = resolved["dir"], resolved["manifest"]
-                gh_bundle.persist_refs(bundle_dir, manifest, shots)
-                doc_payload = {
-                    "film_prompt": film_prompt,
-                    "shots": [
-                        {
-                            "segment": shot_index + 1,
-                            "duration": plan["segments"][shot_index]["duration"],
-                            "prompt": plan["segments"][shot_index]["prompt"],
-                            "loras": plan["segments"][shot_index].get("loras"),
-                            "mods": plan["segments"][shot_index].get("mods"),
-                            "ref_files": [
-                                ref["file"] for ref in manifest.get("refs") or []
-                                if any(slot.startswith(f"shot{shot_index + 1}.")
-                                       for slot in ref.get("slots") or [])
-                            ],
-                        }
-                        for shot_index in range(len(plan["segments"]))
-                    ],
-                }
-                gh_bundle.write_doc(bundle_dir, manifest, doc_payload)
-                plan["bundle_dir"] = bundle_dir
+                # 参考媒体只算内容 hash（喂缓存键），不落盘副本。
+                plan["media_hashes"] = gh_bundle.shot_media_digests(shots)
+                plan["bundle_dir"] = resolved["dir"]
                 plan["film_key"] = resolved["film_key"]
-                plan["cache_enabled"] = os.environ.get("LK_SEGMENT_CACHE", "1") != "0"
+                plan["cache_enabled"] = True
         start = int(plan["range"]["start"]) - 1
         end = int(plan["range"]["end"]) - 1
         template = build_empty_plan_latent(plan, start, end)
@@ -621,8 +624,8 @@ class MiniMaxH3ComposerGH(io.ComfyNode):
 
 class MiniMaxH3ShotGH(io.ComfyNode):
     """One shot of the long video: duration, prompt, reference media and
-    per-shot LoRA/RefMod rows (managed by the panel through ``shot_json``).
-    Output connects to the MiniMaxH3分镜合成 node.
+    per-shot LoRA rows (managed by the panel through ``shot_json``).
+    Output chains through 前序分镜/分镜序列 into the composer.
     """
 
     @classmethod
@@ -631,7 +634,7 @@ class MiniMaxH3ShotGH(io.ComfyNode):
             node_id="LKH3Shot",
             display_name="MiniMaxH3分镜（LK）",
             category=NODE_CATEGORY,
-            description="One long-video shot. Media arrives through the link sockets; LoRA/RefMod rows are managed by the panel.",
+            description="One long-video shot. Media arrives through the link sockets; LoRA rows are managed by the panel.",
             inputs=[
                 io.Int.Input(
                     "duration", default=5, min=2, max=30, step=1,
@@ -653,13 +656,20 @@ class MiniMaxH3ShotGH(io.ComfyNode):
                 io.Audio.Input("ref_audio_3", optional=True),
                 io.String.Input(
                     "shot_json", default="", optional=True, extra_dict={"hidden": True},
-                    tooltip="Per-shot LoRA/RefMod rows (managed by the panel)",
+                    tooltip="Per-shot LoRA rows (managed by the panel)",
+                ),
+                # Appended LAST so legacy canvases keep every socket on its
+                # original index - the chain input is purely additive.
+                io.Custom("LK_H3_SHOT_GROUP").Input(
+                    "group_in", optional=True,
+                    display_name="前序分镜",
+                    tooltip="接上一个 分镜 或 分镜组 的「分镜序列」输出——本镜排在序列尾。",
                 ),
             ],
             outputs=[
-                io.Custom("LK_H3_SHOT").Output(
-                    display_name="shot",
-                    tooltip="Connect to a MiniMaxH3分镜合成 slot (分镜 1-8).",
+                io.Custom("LK_H3_SHOT_GROUP").Output(
+                    display_name="分镜序列",
+                    tooltip="以本镜结尾的分镜序列。接下一镜/组的 前序分镜，或接 Composer 的 分镜序列。",
                 ),
             ],
         )
@@ -670,13 +680,14 @@ class MiniMaxH3ShotGH(io.ComfyNode):
                 ref_image_4=None, ref_image_5=None, ref_image_6=None,
                 ref_video_1=None, ref_video_2=None,
                 ref_audio_1=None, ref_audio_2=None, ref_audio_3=None,
-                shot_json=""):
-        mods, loras = [], []
+                shot_json="", group_in=None):
+        if group_in is not None and not isinstance(group_in, list):
+            raise ValueError("前序分镜 输入必须是分镜序列（请连接上一个 分镜/分镜组 的「分镜序列」输出）。")
+        loras = []
         audio_mode = ""
         try:
             parsed = json.loads(shot_json) if isinstance(shot_json, str) and shot_json.strip() else {}
             if isinstance(parsed, dict):
-                mods = parsed.get("mods") or []
                 loras = parsed.get("loras") or []
                 shot_audio = str(parsed.get("audio_mode") or "").strip().lower()
                 if shot_audio in ("lock_source", "reference_only", "native"):
@@ -687,7 +698,7 @@ class MiniMaxH3ShotGH(io.ComfyNode):
                               ref_image_4, ref_image_5, ref_image_6) if t is not None]
         videos = [t for t in (ref_video_1, ref_video_2) if t is not None]
         audios = [t for t in (ref_audio_1, ref_audio_2, ref_audio_3) if t is not None]
-        return io.NodeOutput({
+        shot_dict = {
             "duration": duration,
             "prompt": prompt or "",
             "first_frame": first_frame,
@@ -695,7 +706,279 @@ class MiniMaxH3ShotGH(io.ComfyNode):
             "images": images,
             "videos": videos,
             "audios": audios,
-            "mods": mods,
             "loras": loras,
             "audio_mode": audio_mode,
-        })
+        }
+        # 组链输出：上游链 + 本镜（散点直插组链；无上游时为单镜 1 元素链）。
+        chain = [item for item in (group_in or []) if isinstance(item, dict)]
+        chain.append(shot_dict)
+        return io.NodeOutput(chain)
+
+
+GROUP_MAX_SHOTS = 3
+MAX_SHOT_LORAS = 4
+
+
+def _load_video_by_name(name):
+    """按 input 目录文件名加载 V3 Video 对象（分镜组弹出镜上传通道）。"""
+    if not name or name == "(none)":
+        return None
+    try:
+        return VideoFromFile(folder_paths.get_annotated_filepath(name))
+    except Exception as exc:
+        logging.info("[LKH3] 分镜组：参考视频 %s 加载失败（跳过）：%s", name, exc)
+        return None
+
+
+def fill_inherited_refs(shots) -> None:
+    """Composer 展平后的参考上下文补全（原地修改）。
+
+    组节点只能看到组链里的上游——组链之前的散点分镜对它是不可见的，所以
+    「继承」标记为空参考的第一组镜头会在这里兜底：从展平序里最近的已声明
+    镜（含散点）填入参考。散点分镜不带 refs_source 标记，永不被填充
+    （散点语义 = 接了才算）。填充后的镜自身成为新的上下文，后续继承镜
+    依次取到同一套参考。"""
+    context = None
+    for shot in shots:
+        if not isinstance(shot, dict):
+            continue
+        if shot.get("images") or shot.get("videos") or shot.get("audios"):
+            context = shot
+            continue
+        if shot.get("refs_source") == "inherit" and context is not None:
+            shot["images"] = list(context.get("images") or [])
+            shot["videos"] = list(context.get("videos") or [])
+            shot["audios"] = list(context.get("audios") or [])
+            context = shot
+
+
+def _group_pool_values(pool):
+    """Flatten one Autogrow pool dict into an ordered list of non-None values
+    (slot ordinal order)."""
+    values = []
+    if isinstance(pool, dict):
+        for key in sorted(pool, key=lambda k: int(k.rsplit("_", 1)[-1])
+                          if k.rsplit("_", 1)[-1].isdigit() else 0):
+            if pool.get(key) is not None:
+                values.append(pool[key])
+    return values
+
+
+class MiniMaxH3ShotGroupGH(io.ComfyNode):
+    """分镜组：一个节点收纳 ≤3 个分镜，链式串联定顺序。
+
+    分镜1（主分镜）保留全套参考 socket；分镜2/3 在面板卡片内编辑（提示词/
+    时长/音频模式/LoRA），参考默认「继承主分镜」，需要不同的参考时
+    用卡片里的 ＋图片/＋视频/＋音频/＋首帧/＋尾帧 按钮上传（lanxi 操作台
+    同款按钮驱动方式）。输出 = 上游链 + 本组活动分镜（prompt 非空或有媒体
+    才算活动），接到 Composer 的「分镜序列」口；多节点首尾相接即完整片顺序。
+    """
+
+    @classmethod
+    def define_schema(cls):
+        inputs = [
+            io.Custom("LK_H3_SHOT_GROUP").Input(
+                "group_in", optional=True, display_name="前序分镜",
+                tooltip="链接上一个分镜组的输出（多组首尾相接）。组链传递顺序与参考上下文：各镜「参考」开关默认「继承」，无自己连线/上传时自动取链上就近声明的参考；提示词/LoRA/音频模式/首尾帧等参数永不跨组。",
+            ),
+            io.String.Input(
+                "group_json", default="", optional=True, extra_dict={"hidden": True},
+                tooltip="Per-shot group state (managed by the panel)",
+            ),
+        ]
+        return io.Schema(
+            node_id="LKH3ShotGroup",
+            display_name="MiniMaxH3 分镜组（LK）",
+            category=NODE_CATEGORY,
+            description=(
+                "One shot group: up to 3 shots in one node, all reference media "
+                "uploaded via card buttons (lanxi 操作台 style — no reference "
+                "lines).  Each shot can 跟随上游链上下文 (default) or set its "
+                "own uploads.  Chain groups through group_in/group_out; connect "
+                "the last group to the composer's 分镜序列 input."
+            ),
+            inputs=inputs,
+            outputs=[
+                io.Custom("LK_H3_SHOT_GROUP").Output(
+                    display_name="分镜序列",
+                    tooltip="本组活动分镜 + 前序分镜 组成的分镜序列。接下一镜/组的 前序分镜，或接 Composer 的 分镜序列。",
+                ),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, group_in=None, group_json=""):
+        if group_in is not None and not isinstance(group_in, list):
+            raise ValueError("前序分镜 输入必须是分镜序列（请连接上一个 分镜/分镜组 的「分镜序列」输出）。")
+
+        # 面板状态：三行（缺行用默认值容错，风格同 LKH3Shot 的解析）。弹出镜
+        # 的参考媒体是卡片按钮上传的文件名（lanxi 操作台同款按钮驱动）。
+        rows = []
+        try:
+            parsed = json.loads(group_json) if isinstance(group_json, str) and group_json.strip() else {}
+            if isinstance(parsed, dict):
+                rows = parsed.get("shots") or []
+            elif isinstance(parsed, list):
+                rows = parsed
+        except (TypeError, ValueError):
+            rows = []
+
+        def _name_list(value):
+            if not isinstance(value, list):
+                return []
+            return [str(item).strip() for item in value if str(item or "").strip()]
+
+        def _name_or_none(value):
+            name = str(value or "").strip()
+            return name or None
+
+        states = []
+        for i in range(GROUP_MAX_SHOTS):
+            row = rows[i] if i < len(rows) and isinstance(rows[i], dict) else {}
+            shot_audio = str(row.get("audio_mode") or "").strip().lower()
+            if shot_audio not in ("lock_source", "reference_only", "native"):
+                shot_audio = ""
+            try:
+                duration = max(2, min(30, int(row.get("duration") or 5)))
+            except (TypeError, ValueError):
+                duration = 5
+            states.append({
+                "duration": duration,
+                "prompt": str(row.get("prompt") or ""),
+                "audio_mode": shot_audio,
+                "loras": list(row.get("loras") or [])[:MAX_SHOT_LORAS] if isinstance(row.get("loras"), list) else [],
+                "inherit_refs": bool(row.get("inherit_refs", True)),
+                # enabled = 用户在面板里展开/添加过该弹出镜（意图标记）。没有
+                # 它，从未触碰的分镜3空行会因「继承」凭空激活成多余的一镜。
+                "enabled": bool(row.get("enabled", False)),
+                "images": _name_list(row.get("images")),
+                "videos": _name_list(row.get("videos")),
+                "audios": _name_list(row.get("audios")),
+                "first_frame": _name_or_none(row.get("first_frame")),
+                "last_frame": _name_or_none(row.get("last_frame")),
+            })
+
+        # 主镜参考 = 卡片按钮上传（lanxi 按钮驱动；组节点无参考连线）
+        main_images, main_videos, main_audios = [], [], []
+        main_first = main_last = None
+        if states[0]["images"] or states[0]["videos"] or states[0]["audios"] \
+                or states[0]["first_frame"] or states[0]["last_frame"]:
+            main_images = [img for img in (_load_image_file(name) for name in states[0]["images"])
+                           if img is not None]
+            main_videos = [vid for vid in (_load_video_by_name(name) for name in states[0]["videos"])
+                           if vid is not None]
+            main_audios = [aud for aud in (_load_audio_file(name) for name in states[0]["audios"])
+                           if aud is not None]
+            main_first = _load_image_file(states[0]["first_frame"]) if states[0]["first_frame"] else None
+            main_last = _load_image_file(states[0]["last_frame"]) if states[0]["last_frame"] else None
+
+        shots_out = [item for item in (group_in or []) if isinstance(item, dict)]
+        kept, skipped = [], []
+
+        def _nearest_declared_refs():
+            """组链内的参考上下文：最近一个自带参考媒体的上游组镜。
+            「独立且空」的镜透明——不截断上下文流。散点分镜不在组链里，
+            由 Composer 的展平补全遍历兜底（refs_source="inherit" 标记）。"""
+            for shot in reversed(upstream):
+                if shot.get("images") or shot.get("videos") or shot.get("audios"):
+                    return (shot.get("images"), shot.get("videos"), shot.get("audios"))
+            return (None, None, None)
+
+        upstream = shots_out
+
+        # —— 分镜1（主）：own socket > 继承上游就近声明 > 空。继承只填参考，
+        #    永不激活镜头（激活只看自身内容——空主镜不凭继承出片）。——
+        state1 = states[0]
+        if main_images or main_videos or main_audios:
+            main_refs = (main_images, main_videos, main_audios)
+            main_source = "own"
+        elif state1["inherit_refs"]:
+            main_refs = _nearest_declared_refs()
+            main_source = "inherit"
+        else:
+            main_refs = (None, None, None)
+            main_source = "none"
+        main_active = bool(state1["prompt"].strip()) or bool(
+            main_images or main_videos or main_audios
+        ) or main_first is not None or main_last is not None
+        if main_active:
+            kept.append("分镜1")
+            shots_out.append({
+                "duration": state1["duration"],
+                "prompt": state1["prompt"],
+                "first_frame": main_first,
+                "last_frame": main_last,
+                "images": main_refs[0] or [],
+                "videos": main_refs[1] or [],
+                "audios": main_refs[2] or [],
+                "loras": state1["loras"],
+                "audio_mode": state1["audio_mode"],
+                "refs_source": main_source,
+            })
+        else:
+            skipped.append("分镜1")
+
+        # —— 分镜2/3：参考来源 own上传 > 继承主镜解析结果（主镜未参与时退
+        #    到就近上游声明）> 空。首尾帧不参与继承——逐镜锚定，不是参考。——
+        for n in (2, 3):
+            state = states[n - 1]
+            gated = state["enabled"] or bool(state["prompt"].strip())                 or state["images"] or state["videos"] or state["audios"]                 or state["first_frame"] or state["last_frame"]
+            # 弹出镜参与门：面板展开/添加过（enabled）或本身有内容（含上传
+            # 的独立首尾帧）。默认空行永不凭继承激活。
+            if not gated:
+                skipped.append(f"分镜{n}")
+                continue
+
+            # 加载弹出镜自己上传的参考（继承模式下为空列表，不产生 IO）。
+            loaded_images = [img for img in (_load_image_file(name) for name in state["images"])
+                             if img is not None]
+            loaded_videos = [vid for vid in (_load_video_by_name(name) for name in state["videos"])
+                             if vid is not None]
+            loaded_audios = [aud for aud in (_load_audio_file(name) for name in state["audios"])
+                             if aud is not None]
+            loaded_first = _load_image_file(state["first_frame"]) if state["first_frame"] else None
+            loaded_last = _load_image_file(state["last_frame"]) if state["last_frame"] else None
+            has_own = bool(loaded_images or loaded_videos or loaded_audios
+                           or loaded_first is not None or loaded_last is not None)
+
+            if has_own:
+                images, videos, audios = loaded_images, loaded_videos, loaded_audios
+                refs_source = "own"
+            elif state["inherit_refs"] and main_active:
+                # 主镜已参与 → 继承主镜解析结果（同一对象即可：refs/ 按
+                # 内容去重，connected 通道共享张量）。
+                images, videos, audios = main_refs
+                refs_source = "inherit"
+            elif state["inherit_refs"]:
+                images, videos, audios = _nearest_declared_refs()
+                refs_source = "inherit"
+            else:
+                images, videos, audios = ([], [], [])
+                refs_source = "none"
+            active = bool(state["prompt"].strip()) or images or videos or audios                 or loaded_first is not None or loaded_last is not None
+            label = f"分镜{n}"
+            if not active:
+                skipped.append(label)
+                continue
+            kept.append(label)
+            shots_out.append({
+                "duration": state["duration"],
+                "prompt": state["prompt"],
+                "first_frame": loaded_first,
+                "last_frame": loaded_last,
+                "images": images or [],
+                "videos": videos or [],
+                "audios": audios or [],
+                "loras": state["loras"],
+                "audio_mode": state["audio_mode"],
+                "refs_source": refs_source,
+            })
+        if skipped:
+            logging.info("[LKH3] 分镜组：跳过无内容的 %s", "、".join(skipped))
+        if kept or shots_out:
+            logging.info(
+                "[LKH3] 分镜组：活动 %s%s",
+                "、".join(kept) or "（无）",
+                f"（含上游 {len(shots_out) - len(kept)} 镜）" if len(shots_out) > len(kept) else "",
+            )
+        return io.NodeOutput(shots_out)

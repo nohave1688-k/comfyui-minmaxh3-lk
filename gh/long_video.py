@@ -50,13 +50,11 @@ from .sampling import (
     shift_sigma,
     time_shift_sigma,
 )
-from ..refmod.nodes import load_visual_mods
 
 MAX_SEGMENTS = 8
 MAX_IMAGES = 6
 MAX_VIDEOS = 2
 MAX_AUDIOS = 3
-MAX_MODS = 8
 MAX_LORAS = 4
 MIN_DURATION = 2
 MAX_DURATION = 30
@@ -158,19 +156,6 @@ def _normalize_segment(raw, index):
             "trimStart": start,
             "trimEnd": end if end is not None and end > start else None,
         })
-    mods = []
-    for item in raw.get("mods") or []:
-        if isinstance(item, str):
-            item = {"name": item}
-        if not isinstance(item, dict):
-            continue
-        name = _clean_name(item.get("name"))
-        if not name or name in ("(none)", "None"):
-            continue
-        strength = _clamp_float(item.get("strength", 1.0), 1.0, 0.05, 1.0)
-        count = _clamp_int(item.get("count", item.get("visuals", 1)), 1, 1, 256)
-        if len(mods) < MAX_MODS:
-            mods.append({"name": name, "strength": strength, "count": count})
     loras = []
     for item in raw.get("loras") or []:
         if isinstance(item, str):
@@ -195,7 +180,6 @@ def _normalize_segment(raw, index):
         "images": images,
         "videos": videos,
         "audios": audios,
-        "mods": mods,
         "loras": loras,
         "audio_mode": per_shot_audio,
     }
@@ -334,7 +318,6 @@ def build_segment_bundle(plan, index, first_frame_override=None, clip=None, conn
             if audio is not None:
                 audios[f"ref_audio_{audio_index}"] = audio
 
-    mods = load_visual_mods(segment.get("mods") or [])
     ordered_drive = list(video_audio.values()) + list(audios.values())
     drive_audio = ordered_drive[0] if ordered_drive else None
     # Per-shot audio mode overrides the composer's global mode (empty string =
@@ -355,7 +338,6 @@ def build_segment_bundle(plan, index, first_frame_override=None, clip=None, conn
         False, plan.get("ref_image_size") or "match",
         drive_audio, final_audio,
         first, last, refs, ref_videos, video_audio, audios,
-        ref_mods=mods,
     )
     bundle = {
         "positive": result[0], "av_latent": result[1], "mux_audio": result[2],
@@ -364,7 +346,7 @@ def build_segment_bundle(plan, index, first_frame_override=None, clip=None, conn
         "width": width, "height": height, "length": length,
         "duration_seconds": segment["duration"], "resolved_mode": "all_reference",
         "is_original_audio": audio_mode == "lock_source",
-        "refmods": mods, "segment_index": index + 1, "prompt": segment.get("prompt") or "",
+        "segment_index": index + 1, "prompt": segment.get("prompt") or "",
     }
     report = bundle.get("report") or ""
     bundle["report"] = f"segment={index + 1}\n{report}".strip()
@@ -373,13 +355,12 @@ def build_segment_bundle(plan, index, first_frame_override=None, clip=None, conn
     # shows up here as a warning line — the model cannot reference media that
     # was never packed.
     logging.info(
-        "[LKH3] 镜头%d 条件打包: pictures=%d videos=%d audios=%d loras=%d mods=%d audio_mode=%s | %s",
+        "[LKH3] 镜头%d 条件打包: pictures=%d videos=%d audios=%d loras=%d audio_mode=%s | %s",
         index + 1,
         len(refs),
         len(ref_videos),
         len(audios),
         len(segment.get("loras") or []),
-        len(mods),
         audio_mode,
         " | ".join(report.splitlines()[:10]),
     )
@@ -396,24 +377,6 @@ def _connected_source_size(connected):
     return None, None
 
 
-
-
-def _clamp_shot_mods(raw_mods):
-    mods = []
-    for item in raw_mods or []:
-        if isinstance(item, str):
-            item = {"name": item}
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or "").strip()
-        if not name or name in {"(none)", "None"}:
-            continue
-        mods.append({
-            "name": name,
-            "strength": max(0.05, min(1.0, float(item.get("strength") or 1) or 1)),
-            "count": max(1, min(256, int(item.get("count") or 1))),
-        })
-    return mods[:MAX_MODS]
 
 
 def _clamp_shot_loras(raw_loras):
@@ -583,7 +546,7 @@ def build_plan_from_shot_nodes(*, settings=None, shots, film_settings=None,
     settings = settings if isinstance(settings, dict) else {}
     film = film_settings if isinstance(film_settings, dict) else {}
     if not isinstance(shots, (list, tuple)) or not shots:
-        raise ValueError("至少连接一个「MiniMaxH3分镜」节点到分镜合成节点。")
+        raise ValueError("至少连接一个「MiniMaxH3分镜/分镜组」的「分镜序列」输出到 编排节点 的 分镜序列 输入。")
     limit = max_segments or MAX_SEGMENTS
 
     try:
@@ -629,7 +592,7 @@ def build_plan_from_shot_nodes(*, settings=None, shots, film_settings=None,
             "duration": duration,
             "prompt": prompt,
             "length": _media().calculate_length(duration),
-            "mods": _clamp_shot_mods(shot.get("mods")),
+
             "loras": _clamp_shot_loras(shot.get("loras")),
             "index": idx,
             "audio_mode": _clamp_shot_audio_mode(shot.get("audio_mode")),
@@ -894,7 +857,6 @@ def _assemble_whole_av_latent(collected, audio_mode, latent_continue, start, end
     out = {
         "samples": comfy.nested_tensor.NestedTensor((video, audio)),
         "gh_h3_audio_mode": audio_mode or "native",
-        "lk_bundle_dir": plan.get("bundle_dir") if isinstance(plan, dict) else None,
         "lk_layout": {
             "version": 1,
             "pass": "first",
@@ -1036,7 +998,8 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
                    sampler_name, scheduler, seed, seed_policy, cfg, release_clip,
                    free_between_segments, context_noise=0.0,
                    video_vae=None, audio_vae=None, clip=None, prebuilt=None,
-                   external_noise=None, external_sigmas=None, external_sampler=None):
+                   external_noise=None, external_sigmas=None, external_sampler=None,
+                   sharpness_anchor=False):
     plan = segments
     if not isinstance(plan, dict) or not plan.get("segments"):
         raise ValueError("Connect the storyboard node's 'segments' output to the long video sampler.")
@@ -1052,6 +1015,8 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
     end = int(plan["range"]["end"]) - 1
     latent_continue = bool(plan.get("latent_continue", True))
     context_noise = _finite_clamp(context_noise, 0.0, 0.0, 1.0)
+    sharpness_anchor = bool(sharpness_anchor)
+    anchor_tail_image = None   # previous shot's decoded last frame (pixels)
     lora_cache = _lora_cache()
     clip = plan.get("clip")
     prebuilt_bundle = None
@@ -1079,6 +1044,13 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
     # so lazy builds stay semantically correct either way.
     import os
     prebuild = os.environ.get("LK_PREBUILD") == "1"
+    if sharpness_anchor and prebuild:
+        # The anchor needs each shot built AFTER the previous one sampled
+        # (its tail frame feeds the next build) - the hoisted pre-build order
+        # can never see an anchor image.  Reference adherence wins over the
+        # load-count optimization.
+        prebuild = False
+        logging.info("[LKH3] 锐度锚已启用：切回逐镜懒构建（预构建与锚不兼容）")
     bundles = {}
     first_positive = None
     # Frontend/back-end desync tripwire: a widget can RENDER one value while
@@ -1104,18 +1076,56 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
         cache_manifest = bundle_mod.load_manifest(bundle_dir) or {}
         first_entries = cache_manifest.get(bundle_mod.PASS_FIRST) or {}
 
+    def _sampling_key_payload():
+        # 采样配方进缓存键的部分（外接原语只记 sigmas 内容与类型名）。
+        return {"steps": int(steps), "shift_video": float(shift_video),
+                "shift_audio": float(shift_audio), "sampler_name": sampler_name,
+                "scheduler": scheduler, "cfg": float(cfg),
+                "context_noise": float(context_noise), "seed_policy": seed_policy,
+                # 外接采样原语（T8 双钟等）：sigmas 调度直接进键；noise/
+                # sampler 是对象，仅记类型——更换外接采样配方请同时改任一
+                # 采样参数强制 miss。
+                "external": {
+                    "sigmas": (bundle_mod.sha256_tensor(external_sigmas)[:16]
+                               if external_sigmas is not None else None),
+                    "noise": type(external_noise).__name__ if external_noise is not None else None,
+                    "sampler": type(external_sampler).__name__ if external_sampler is not None else None,
+                }}
+
     # 中段起跑的接缝正确性：束内有上一镜缓存时，载入其尾部 latent 作为
-    # 续接起点（与整片跑的续接逐位一致）；无缓存则保持冷启动（旧行为）。
-    if cache_on and start > 0 and previous_samples is None \
-            and bundle_mod.has_segment(bundle_dir, bundle_mod.PASS_FIRST, start - 1):
-        prev_data = bundle_mod.load_segment(bundle_dir, bundle_mod.PASS_FIRST, start - 1)
-        if prev_data is not None:
-            previous_samples = comfy.nested_tensor.NestedTensor(
-                (prev_data["video"], prev_data["audio"])
+    # 续接起点（与整片跑的续接逐位一致）。两道门禁，缺一不可：
+    # 1) manifest 门禁——上一镜的台账条目存在且 spec_hash 与当前规格一致
+    #    （画布/提示词/参考/参数都没变，它的尾巴才是同内容同形状的）。
+    #    身份变更（换画布等）会重开台账 → 旧台账条目消失 → 不再认旧尾巴，
+    #    否则共享束目录里跨画布的残量文件会带着错误形状炸掉 _carry_latent。
+    # 2) 形状守卫——载入后 C/H/W 与 plan 画布不符同样放弃续接、冷启动。
+    if cache_on and start > 0 and previous_samples is None:
+        prev_entry = first_entries.get(str(start - 1))
+        carry_allowed = False
+        if prev_entry is not None:
+            prev_seed = int(seed) if seed_policy == "fixed" else int(seed) + (start - 1)
+            prev_spec = bundle_mod.spec_hash(
+                plan, start - 1, prev_seed, _sampling_key_payload(),
+                bundle_mod.PASS_FIRST,
             )
-            logging.info(
-                "[LKH3] 缓存：载入镜头%d 尾部作为起跑续接（接缝与整片一致）", start
-            )
+            carry_allowed = prev_entry.get("spec_hash") == prev_spec \
+                and bundle_mod.has_segment(bundle_dir, bundle_mod.PASS_FIRST, start - 1)
+        if carry_allowed:
+            prev_data = bundle_mod.load_segment(bundle_dir, bundle_mod.PASS_FIRST, start - 1)
+            pv, pa = (prev_data or {}).get("video"), (prev_data or {}).get("audio")
+            expect_h = int(plan.get("height") or 0) // 16
+            expect_w = int(plan.get("width") or 0) // 16
+            if pv is None or pa is None or pv.ndim != 5 or pv.shape[3] != expect_h \
+                    or pv.shape[4] != expect_w or pa.ndim != 4:
+                logging.warning(
+                    "[LKH3] 缓存：镜头%d 的上一镜尾部形状与当前画布不符（残量缓存），"
+                    "放弃续接、本镜冷启动", start
+                )
+            else:
+                previous_samples = comfy.nested_tensor.NestedTensor((pv, pa))
+                logging.info(
+                    "[LKH3] 缓存：载入镜头%d 尾部作为起跑续接（接缝与整片一致）", start
+                )
 
     for index in range(start, end + 1):
         segment = plan["segments"][index]
@@ -1139,20 +1149,7 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
             else:
                 cache_carry = "none"
             cache_spec = bundle_mod.spec_hash(
-                plan, index, seg_seed,
-                {"steps": int(steps), "shift_video": float(shift_video),
-                 "shift_audio": float(shift_audio), "sampler_name": sampler_name,
-                 "scheduler": scheduler, "cfg": float(cfg),
-                 "context_noise": float(context_noise), "seed_policy": seed_policy,
-                 # 外接采样原语（T8 双钟等）：sigmas 调度直接进键；noise/
-                 # sampler 是对象，仅记类型——更换外接配方请同时改任一采样
-                 # 参数强制 miss（复现说明里有说明）。
-                 "external": {
-                     "sigmas": (bundle_mod.sha256_tensor(external_sigmas)[:16]
-                                if external_sigmas is not None else None),
-                     "noise": type(external_noise).__name__ if external_noise is not None else None,
-                     "sampler": type(external_sampler).__name__ if external_sampler is not None else None,
-                 }},
+                plan, index, seg_seed, _sampling_key_payload(),
                 bundle_mod.PASS_FIRST,
             )
             cache_key = bundle_mod.key_of(cache_spec, cache_carry)
@@ -1184,9 +1181,25 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
                     clip = _load_clip(plan)
                 # No automatic previous-tail keyframe: continuation is carried in
                 # latent space below, not as a first-frame conditioning image.
+                conn = dict((plan.get("connected_by_segment") or {}).get(index + 1) or {})
+                if sharpness_anchor and anchor_tail_image is not None:
+                    # Sharpening anchor: the previous shot's decoded last frame
+                    # rides as an EXTRA reference image after the manual ones,
+                    # so the temporal attention matches sharpness against the
+                    # real previous-frame statistics instead of drifting soft
+                    # hop over hop.  H3 caps references at 9 images and
+                    # build_conditioning RAISES past that - inject only into a
+                    # free slot, warn when the shot is already full.
+                    if len(conn.get("images") or []) < 9:
+                        conn.setdefault("images", []).append(anchor_tail_image)
+                        logging.info("[LKH3] 镜头%d 注入上一镜末帧锐度锚（附加参考）", index + 1)
+                    else:
+                        logging.warning(
+                            "[LKH3] 镜头%d 手动参考已满 9 张，锐度锚本镜跳过", index + 1
+                        )
                 bundle = build_segment_bundle(
                     plan, index, first_frame_override=None, clip=clip,
-                    connected=(plan.get("connected_by_segment") or {}).get(index + 1),
+                    connected=conn,
                 )
                 if prebuild:
                     bundles[index] = bundle
@@ -1247,6 +1260,24 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
             # ``samples`` is the segment's output dict; carry its nested latent
             # tensor into the next segment.
             previous_samples = samples["samples"]
+        if sharpness_anchor and index < end:
+            # Decode this shot's LAST latent frame into pixels for the next
+            # shot's sharpening anchor: a single tail-slice VAE decode, so the
+            # next shot's temporal attention matches sharpness against the
+            # real previous-frame statistics instead of drifting soft hop
+            # over hop.
+            try:
+                with torch.no_grad():
+                    _v = samples["samples"].unbind()[0]
+                    _tail = _v[..., -2:, :, :] if int(_v.shape[2]) >= 2 else _v
+                    _frames = plan["video_vae"].decode(_tail)
+                    if _frames.ndim == 5:
+                        _frames = _frames.reshape(-1, *_frames.shape[-3:])
+                    anchor_tail_image = _frames[-1:].clamp(0.0, 1.0).detach().to("cpu")
+                logging.info("[LKH3] 镜头%d 末帧已解码为下一镜锐度锚", index + 1)
+            except Exception as _err:
+                logging.warning("[LKH3] 镜头%d 末帧解码失败（锐度锚跳过）: %s", index + 1, _err)
+                anchor_tail_image = None
         seg_video, seg_audio = nested_av_parts(samples)
         seg_vmask, seg_amask = _collapse_av_mask(samples)
         absolute_start = None
@@ -1317,12 +1348,14 @@ def run_long_video(model, segments, *, steps, shift_video, shift_audio,
 
 
 def build_empty_plan_latent(plan, start, end):
-    """Whole-range empty AV template with the layout the segmented sampler
-    assembles (per-shot own-token spans, carry heads excluded).
+    """Whole-range empty AV template with FULL per-shot token spans (no carry
+    trims - the template predates sampling, so no carry heads exist to trim).
 
     Feeds contract nodes (双钟采样 / T8 sampler contracts) and
     SamplerCustomAdvanced's ``latent_image`` without depending on the
-    sampler's own output, so external sampling recipes stay acyclic.
+    sampler's own output, so external sampling recipes stay acyclic.  When
+    this template's layout rides on an honest pass-1 tensor, the refine
+    pass's layout-drift guard re-derives the true carried spans.
     """
     width, height = int(plan["width"]), int(plan["height"])
     videos = []
@@ -1386,7 +1419,8 @@ class _SegmentedAVGuider:
 
     def __init__(self, model_patcher, plan, *, steps, shift_video, shift_audio,
                  sampler_name, scheduler, seed_policy, context_noise,
-                 release_clip, free_between_segments, video_vae, audio_vae, prebuilt):
+                 release_clip, free_between_segments, video_vae, audio_vae, prebuilt,
+                 sharpness_anchor=False):
         self.model_patcher = model_patcher
         self._plan = plan
         self._steps = int(steps)
@@ -1402,6 +1436,7 @@ class _SegmentedAVGuider:
         self._video_vae = video_vae
         self._audio_vae = audio_vae
         self._prebuilt = prebuilt
+        self._sharpness_anchor = bool(sharpness_anchor)
 
     def sample(self, noise, latent_image, sampler, sigmas,
                denoise_mask=None, callback=None, disable_pbar=False, seed=None):
@@ -1415,6 +1450,7 @@ class _SegmentedAVGuider:
             context_noise=self._context_noise,
             video_vae=self._video_vae, audio_vae=self._audio_vae,
             prebuilt=self._prebuilt,
+            sharpness_anchor=self._sharpness_anchor,
             # The SCA sampler is the whole-film contract object; per-segment
             # dual-clock samplers must be rebuilt against each segment's own
             # audio length (see _external_sampler_for), so only the schedule
@@ -1461,13 +1497,17 @@ class MiniMaxH3SegmentGuiderGH(io.ComfyNode):
                 ),
                 io.Combo.Input("seed_policy", options=["increment", "fixed"], default="fixed",
                                tooltip="increment = 每镜种子+1；fixed = 全部镜头同一种子。基础种子来自 SamplerCustomAdvanced 的噪声原语（RandomNoise 的种子）。"),
-                io.Float.Input("context_noise", default=0.0, min=0.0, max=1.0, step=0.05,
-                               tooltip="接缝处对续接上下文帧加噪。0 完全保留上一镜尾帧。"),
+                io.Float.Input("context_noise", default=0.1, min=0.0, max=1.0, step=0.05,
+                               tooltip="接缝处对续接上下文帧轻度重加噪（推荐 0.1–0.15）：采样器对缝部轻度重净，长片不易缓慢劣化。0 完全保留上一镜尾帧。"),
                 io.Boolean.Input(
                     "release_clip", default=False, advanced=True,
                     tooltip="保持关闭（默认）：卸载后重新装载 int8 量化的 32B 文本编码器，热重载的量化状态与首次不一致，参考嵌入会退化——表现为首轮参考正常、后续排队参考丢失。开启仅省显存，代价是参考稳定性。",
                 ),
                 io.Boolean.Input("free_between_segments", default=True, advanced=True),
+                io.Boolean.Input(
+                    "sharpness_anchor", default=False, advanced=True,
+                    tooltip="锐度锚（长片防软化，实测有效）：每镜采样后解码其末帧，作为下一镜的附加参考图——时间注意力按上一镜真实锐度匹配，阻断逐镜向软漂移。与手动参考并存（占下一个空闲参考槽）。",
+                ),
                 io.Custom(RUNTIME_TYPE).Input(
                     "runtime", optional=True, display_name="解码设置",
                     tooltip="CLIP + 视频/音频 VAE 捆绑 — 从 长视频编排 的 解码设置 连一根线即可。未连接时按模型设置名字加载。",
@@ -1494,7 +1534,7 @@ class MiniMaxH3SegmentGuiderGH(io.ComfyNode):
                 sampler_name, scheduler,
                 seed_policy, context_noise,
                 release_clip=True, free_between_segments=True,
-                runtime=None):
+                runtime=None, sharpness_anchor=False):
         plan = segments
         if not isinstance(plan, dict) or not plan.get("segments"):
             raise ValueError("Connect the storyboard node's 'segments' output to the segment guider.")
@@ -1523,6 +1563,7 @@ class MiniMaxH3SegmentGuiderGH(io.ComfyNode):
             release_clip=release_clip, free_between_segments=free_between_segments,
             video_vae=video_vae, audio_vae=audio_vae,
             prebuilt=(first_bundle, clip),
+            sharpness_anchor=sharpness_anchor,
         )
         # The sampler contract is built HERE from the same steps/shifts recipe
         # the loop uses — one source of truth, no separate contract node whose
@@ -1544,7 +1585,7 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
                         audio_vae=None, external_sigmas=None, external_noise=None,
                         external_sampler=None, carry_source="anchor",
                         context_noise=0.15, refine_entry_sigma=0.30,
-                        refine_schedule="native_tail"):
+                        refine_schedule="native_tail", carry_blend=0.5):
     """Segmented HD second pass: refine an upscaled whole-film AV latent one
     shot at a time.
 
@@ -1574,11 +1615,15 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
     # defaults instead of propagating.
     context_noise = _finite_clamp(context_noise, 0.15, 0.0, 1.0)
     refine_entry_sigma = _finite_clamp(refine_entry_sigma, 0.30, 0.02, 1.0)
+    carry_blend = _finite_clamp(carry_blend, 0.5, 0.0, 1.0)
+    carry_desc = (
+        f"hybrid(blend={carry_blend:.2f})" if carry_source == "hybrid" else carry_source
+    )
     logging.info(
         "[LKH3] 二跑精修启动: 镜头%d-%d base=%d coarse=%d denoise=%.2f 续接=%s "
         "release_clip=%s audio=%s | 潜空间形状=%s",
         int(plan["range"]["start"]), int(plan["range"]["end"]),
-        int(base_steps), int(coarse_steps), float(refine_entry_sigma), carry_source,
+        int(base_steps), int(coarse_steps), float(refine_entry_sigma), carry_desc,
         bool(release_clip), audio_policy,
         tuple(refined_latent["samples"].shape) if hasattr(refined_latent["samples"], "shape") else "nested",
     )
@@ -1594,10 +1639,12 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
             "av_latent 必须来自同一分段计划的一采输出放大。"
         )
 
-    # Layout sanity: the learned upscaler re-emits the layout with per-shot
-    # token counts re-derived from each shot's FULL duration, dropping pass-1's
-    # carry trims (CARRY_TOKENS / CARRY_AUDIO_STEPS per carried shot).  Slicing
-    # by those sizes misaligns every shot after the first - the second shot's
+    # Layout sanity: full-duration per-shot token spans (missing pass-1's carry
+    # trims of CARRY_TOKENS / CARRY_AUDIO_STEPS per carried shot) ride in when a
+    # contract-template latent (build_empty_plan_latent) or any legacy layout
+    # replaces an honest pass-1 output - the AV upscalers pass layout through
+    # untouched, so the drift always originates upstream of them.  Slicing by
+    # those sizes misaligns every shot after the first - the second shot's
     # window swallows the next shot's head tokens, the third loses its own -
     # which shows up as duplicated/dropped frames at every seam (the
     # "flicker") while sums drift off the actual tensor.  Detect the drift and
@@ -1640,7 +1687,6 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
             "samples": refined_latent["samples"],
             "gh_h3_audio_mode": refined_latent.get("gh_h3_audio_mode")
             or plan.get("audio_mode") or "native",
-            "lk_bundle_dir": plan.get("bundle_dir"),
             "lk_layout": {
                 "version": 1,
                 "pass": "second-identity",
@@ -2168,7 +2214,6 @@ def run_refine_segments(model, segments, refined_latent, *, base_steps, coarse_s
     out = {
         "samples": comfy.nested_tensor.NestedTensor((out_video, out_audio)),
         "gh_h3_audio_mode": audio_mode or "native",
-        "lk_bundle_dir": plan.get("bundle_dir"),
         "lk_layout": {
             "version": 1,
             "pass": "second",
@@ -2228,7 +2273,7 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
                 ),
                 io.Boolean.Input("free_between_segments", default=True, advanced=True),
                 io.Combo.Input(
-                    "carry_source", options=["anchor", "chained", "none"], default="anchor",
+                    "carry_source", options=["anchor", "chained", "hybrid", "none"], default="anchor",
                     tooltip="每镜续接上下文的来源。anchor = 取自放大的首采潜空间（固定质量锚点，逐镜不复利，8 镜以上全片质量均匀）；chained = 取上一镜的精修输出（接缝与精修结果严格连续，但逐镜链式累积）；none = 不续接，每镜独立精修（诊断用——若 none 干净而其他模式闪烁，问题在续接头机制）。三种模式的续接内容都是上一镜末帧——分镜各自参考不同图片不受影响，参考从不进入续接。",
                 ),
                 io.Float.Input(
@@ -2240,6 +2285,11 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
                     "refine_entry_sigma", default=0.30, min=0.02, max=1.0, step=0.05,
                     optional=True,
                     tooltip="精修入口 σ（绝对值，精确生效）：调度从该 σ 线性降到 0。0.30 恰落在 pika 官方网格的低噪区（~0.333），是蒸馏/加速 LoRA 窗口内的轻度润色；调高到 0.5+ 开始改写纹理，1.0 = 旧截断调度（接近全量重生成，会冲掉参考身份）。噪声来自全片共享的全局噪声场按位置切片，邻镜重建相互关联。",
+                ),
+                io.Float.Input(
+                    "carry_blend", default=0.5, min=0.0, max=1.0, step=0.05,
+                    optional=True,
+                    tooltip="仅 续接来源=hybrid 生效：续接头 = blend×上一镜精修输出尾部 + (1-blend)×一采放大锚点尾部。1.0 = 纯 chained（接缝最连续，逐镜累积漂移），0.0 = 纯 anchor（零漂移），0.5 兼顾。",
                 ),
                 io.Combo.Input(
                     "refine_schedule", options=["native_tail", "absolute_linear"],
@@ -2277,6 +2327,7 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
                 release_clip=True, free_between_segments=True,
                 carry_source="anchor", context_noise=0.15,
                 refine_entry_sigma=0.30, refine_schedule="native_tail",
+                carry_blend=0.5,
                 runtime=None, noise=None):
         clip, video_vae, audio_vae = runtime_parts(runtime)
         return io.NodeOutput(*run_refine_segments(
@@ -2288,7 +2339,7 @@ class MiniMaxH3RefineSegmentsGH(io.ComfyNode):
             release_clip=release_clip, free_between_segments=free_between_segments,
             audio_policy=audio_policy, carry_source=carry_source,
             context_noise=context_noise, refine_entry_sigma=refine_entry_sigma,
-            refine_schedule=refine_schedule,
+            refine_schedule=refine_schedule, carry_blend=carry_blend,
             clip=clip, video_vae=video_vae, audio_vae=audio_vae,
             external_sigmas=None, external_noise=noise, external_sampler=None,
         ))

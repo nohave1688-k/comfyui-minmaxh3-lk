@@ -51,6 +51,10 @@ _ENCODE_CACHE: dict[tuple, object] = {}
 _ENCODE_CACHE_MAX = 16
 
 
+class _StopDebugPNG(Exception):
+    """诊断存证的控制流信号：统计已记录、PNG 不落盘，不算失败。"""
+
+
 def _tensor_fingerprint(tensor) -> tuple:
     # Sum ON the tensor's own device: .item() syncs a scalar, so there is no
     # reason to copy multi-GB video-ref tensors across the bus just to hash
@@ -326,56 +330,6 @@ def _encode_reference_audio(audio_vae, audio: dict):
     return latent, int(latent.shape[-1])
 
 
-def _refmod_visual_block(mod, strength: float):
-    """Build a video-shaped reference block for one visual RefMod.
-
-    The integrated node presents every RefMod as a ``<Video n>`` reference
-    (``mod_1`` -> ``<Video 1>`` and so on).  A still-image RefMod is therefore
-    widened to a single-frame video block: ``PackedLayout`` maps both to one
-    latent frame on the reference timeline, so the token layout is unchanged
-    while the prompt tag and the packed block agree.
-    """
-    builder = getattr(mod, "ref_block", None)
-    if not callable(builder):
-        raise ValueError("RefMod entries must be H3RefMod objects with a ref_block() method.")
-    block = builder(float(strength))
-    if not isinstance(block, dict):
-        return None
-    block = dict(block)
-    # Same marker the RefMod Apply nodes use: H3 RefMod Step Curve only mixes
-    # blocks that carry it, so the integrated node must not drop it.
-    block["refmod"] = True
-    if block.get("kind") == "audio":
-        return block
-    block["kind"] = "video"
-    block["latent_t"] = int(block.get("latent_t") or 1)
-    block["ref_audio_t"] = 0
-    block["audio_latent"] = None
-    return block
-
-
-def _decode_refmod_frames(video_vae, block: dict, reference_fps: float = FPS):
-    """Decode a RefMod latent into the two-fps frame list H3 presents to CLIP.
-
-    Mirrors the RefMod pack's own text encoder so a mod looks identical to the
-    Qwen vision encoder whether it is attached here or through
-    ``H3 RefMod Text Encode``.
-    """
-    pixels = video_vae.decode(block["latent"])
-    if pixels is None:
-        return None, None
-    if pixels.ndim == 5 and pixels.shape[0] == 1:
-        pixels = pixels[0]
-    if pixels.ndim != 4 or pixels.shape[-1] != 3 or pixels.shape[0] < 1:
-        raise ValueError(
-            "The H3 video VAE must decode a RefMod to [1, T, H, W, 3] or "
-            f"[T, H, W, 3]; got {tuple(pixels.shape)}."
-        )
-    times = [i / 2.0 for i in range(math.ceil(pixels.shape[0] * 2.0 / reference_fps))]
-    indices = [min(round(t * reference_fps), pixels.shape[0] - 1) for t in times]
-    return pixels[indices].cpu(), times
-
-
 def build_conditioning(
     clip,
     video_vae,
@@ -398,7 +352,6 @@ def build_conditioning(
     ref_videos=None,
     ref_video_audios=None,
     ref_audios=None,
-    ref_mods=None,
 ):
     if width % 32 or height % 32:
         raise ValueError("MiniMax H3 width and height must be divisible by 32")
@@ -464,16 +417,9 @@ def build_conditioning(
     real_ref_blocks: list[dict] = []
     video_labels: list[str] = []
     audio_labels: list[str] = []
-    # Tag ordinals are dense and RefMods come first: mod_1 is always
-    # <Video 1>, mod_2 is always <Video 2>, regardless of uploaded reference
-    # videos.  Uploaded videos continue the sequence after the mods, so adding
-    # or removing a video never renumbers a RefMod tag.
+    # Tag ordinals are dense: video_1 is always <Video 1>, video_2 is always
+    # <Video 2>, in uploaded reference video order.
     video_tag_ordinals: list[int] = []
-    active_mods = [
-        (mod, float(strength))
-        for mod, strength in (ref_mods or [])
-        if strength is not None and float(strength) > 0.0
-    ]
 
     for image_ordinal, image in ref_image_entries:
         resized, ref_width, ref_height = _resize_reference_image(image, width, height, ref_image_size)
@@ -529,26 +475,48 @@ def build_conditioning(
             }
         )
         picture_labels.append(f"ref_image_{image_ordinal}")
+        if logging.getLogger().isEnabledFor(logging.INFO) and image_ordinal == ref_image_entries[0][0]:
+            # Decode the PACKED reference latent back through the video VAE:
+            # if this round-trip shows the person, the conditioning content is
+            # proven good end-to-end and any downstream resemblance loss is a
+            # sampling-side problem, not a conditioning-side one.
+            try:
+                import time as _time
 
-    mod_video_count = 0
-    for mod_index, (mod, strength) in enumerate(active_mods, 1):
-        block = _refmod_visual_block(mod, strength)
-        if block is None:
-            continue
-        name = str(getattr(mod, "name", "") or f"mod_{mod_index}")
-        if block.get("kind") == "audio":
-            real_ref_items.append({"type": "audio"})
-            real_ref_blocks.append(block)
-            audio_labels.append(f"refmod_audio_{name}")
-            continue
-        frames, timestamps = _decode_refmod_frames(video_vae, block)
-        if frames is None:
-            continue
-        real_ref_items.append({"type": "video", "data": frames, "timestamps": timestamps})
-        real_ref_blocks.append(block)
-        video_labels.append(f"refmod:{name}")
-        mod_video_count += 1
-        video_tag_ordinals.append(mod_video_count)
+                with torch.no_grad():
+                    _back = video_vae.decode(encoded)
+                    if _back.ndim == 5:  # [B, C, T, H, W] -> [B, C, H, W]（切掉时间维，保留 RGB 通道）
+                        _back = _back[:, :, 0]
+                    _back_img = _back[0].clamp(0, 1).mul(255).round().to(torch.uint8).cpu()
+                    _e = encoded.detach().float()
+                # 打包 AV 潜空间走视频 VAE 回解码时通道数可能不是 RGB——
+                # 形状不符就只记统计，不落 PNG（否则 PIL 每镜报一次错）。
+                _frame = _back_img.permute(1, 2, 0).numpy()
+                if _frame.ndim != 3 or _frame.shape[2] not in (1, 3):
+                    logging.info(
+                        "[LKH3] 参考潜空间回解码: 潜空间%s std=%.4f mean=%.4f"
+                        "（解码形状%s 不符，跳过PNG存证）",
+                        tuple(_e.shape), float(_e.std()), float(_e.mean()),
+                        tuple(_frame.shape),
+                    )
+                    raise _StopDebugPNG
+                from PIL import Image as _PILImage
+                import folder_paths as _folder_paths
+
+                _dbgdir = os.path.join(_folder_paths.get_user_directory(), "LK_debug")
+                os.makedirs(_dbgdir, exist_ok=True)
+                _png = os.path.join(
+                    _dbgdir, f"reflatent_{_time.strftime('%Y%m%d_%H%M%S')}_ord{image_ordinal}.png"
+                )
+                _PILImage.fromarray(_frame).save(_png, format="PNG")
+                logging.info(
+                    "[LKH3] 参考潜空间回解码: 潜空间%s std=%.4f mean=%.4f | 存证=%s",
+                    tuple(_e.shape), float(_e.std()), float(_e.mean()), _png,
+                )
+            except _StopDebugPNG:
+                pass
+            except Exception as _dbg_err:
+                logging.info("[LKH3] 参考潜空间回解码诊断失败: %s", _dbg_err)
 
     for index, (video_ordinal, frames) in enumerate(ref_video_entries, 1):
         if frames.ndim != 4 or frames.shape[0] < 5:
@@ -592,7 +560,7 @@ def build_conditioning(
             }
         )
         video_labels.append(f"ref_video_{video_ordinal}")
-        video_tag_ordinals.append(mod_video_count + index)
+        video_tag_ordinals.append(index)
 
     encoded_source = None
     if drive_audio is not None:
@@ -709,13 +677,6 @@ def build_conditioning(
         f"frames={frame_count} ({frame_count / FPS:.3f}s at 24fps)",
         f"pictures={len(picture_labels)}, videos={len(video_labels)}, audios={len(audio_labels)}",
     ]
-    if active_mods:
-        report_lines.append(
-            "refmods=" + ", ".join(
-                f"{getattr(mod, 'name', 'mod')}@{strength:.2f}"
-                for mod, strength in active_mods
-            )
-        )
     report_lines.extend(f"warning: {warning}" for warning in prompt_warnings)
     output_audio = final_audio if final_audio is not None else drive_audio
     return conditioning, latent, output_audio, conditioned_prompt, media_map, "\n".join(report_lines)

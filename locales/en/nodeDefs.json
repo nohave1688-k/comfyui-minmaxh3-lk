@@ -34,6 +34,69 @@
       }
     }
   },
+  "LKH3AVLearnedUpscale": {
+    "display_name": "MiniMax-H3 AV learned upscale (LK)",
+    "description": "Runs the H3 upscaling checkpoint through the T8 dense path (phase-corrected grid transport, continuous scales work); target = first-pass latent x scale_by (even-snap -> /32-aligned canvas). The forward is chunked along lk_layout shot boundaries by default, so the VRAM peak stays O(one shot) no matter how many shots the film has.",
+    "inputs": {
+      "av_latent": {
+        "name": "av_latent",
+        "tooltip": "The whole nested AV latent from the first pass (with lk_layout). A non-nested or malformed (non-2-part) legacy noise_mask is dropped (debug log), not upscaled."
+      },
+      "model_name": {
+        "name": "upscale model",
+        "tooltip": "An H3 upscaling checkpoint from the latent_upscale_models folder."
+      },
+      "scale_by": {
+        "name": "scale by",
+        "tooltip": "Target = first-pass latent x this factor (even-snap -> /32-aligned canvas, aspect ratio closely preserved). Reviewed scale = 1.2; any continuous scale works."
+      },
+      "precision": {
+        "name": "precision",
+        "options": {
+          "fp16": "fp16",
+          "bf16": "bf16",
+          "fp32": "fp32"
+        }
+      },
+      "release_policy": {
+        "name": "release policy",
+        "options": {
+          "offload_after": "offload after run",
+          "clear_after": "clear cache after run",
+          "keep_loaded": "keep loaded"
+        },
+        "tooltip": "offload_after = weights back to CPU after inference (cache kept); clear_after = also drop the cache; keep_loaded = stay resident on GPU."
+      },
+      "chunk_mode": {
+        "name": "chunked forward",
+        "options": {
+          "segments": "per shot",
+          "fixed": "fixed window",
+          "whole": "whole film"
+        },
+        "tooltip": "segments = one forward per lk_layout shot span (default: VRAM peak O(one shot), per-shot GroupNorm statistics stay closer to the training distribution, seams land on hard cuts; layout drift automatically falls back to fixed windows); fixed = fixed-size windows; whole = single whole-film forward (legacy behavior, for short-film A/B and bit-exact reproduction)."
+      },
+      "chunk_window": {
+        "name": "window frames",
+        "tooltip": "Latent frames per window in fixed-window mode (96 ~ 324 real frames, still inside the checkpoint's trained clip length); only used by fixed mode and by the layout-drift fallback."
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "av_latent",
+        "tooltip": "Upscaled and rescaled nested AV latent (with updated lk_layout) - feed the refine pass's av_latent."
+      },
+      "1": {
+        "name": "width"
+      },
+      "2": {
+        "name": "height"
+      },
+      "3": {
+        "name": "report"
+      }
+    }
+  },
   "LKH3Shot": {
     "display_name": "MiniMaxH3 Shot (LK)",
     "description": "One long-video shot: duration, prompt, first/last frame and reference media sockets. Output connects to the MiniMaxH3 Shot Merger node.",
@@ -82,12 +145,16 @@
       },
       "ref_audio_3": {
         "name": "audio 3"
+      },
+      "group_in": {
+        "name": "前序分镜",
+        "tooltip": "Chain from the previous 分镜组/散点分镜 分镜序列 output — this shot lands at the chain tail (no need to route through the 分镜 1-8 slots)."
       }
     },
     "outputs": {
       "0": {
-        "name": "shot",
-        "tooltip": "Connect to a MiniMaxH3 Shot Merger slot (shots 1-8)."
+        "name": "分镜序列",
+        "tooltip": "Single-shot chain (this shot as a 1-entry group chain). Connect to a 分镜组 上游分镜组 or the Composer 分镜序列 input."
       }
     }
   },
@@ -112,6 +179,26 @@
       "1": {
         "name": "音频",
         "tooltip": "Decoded audio."
+      }
+    }
+  },
+  "LKH3ShotGroup": {
+    "display_name": "MiniMaxH3 Shot Group (LK)",
+    "description": "Up to 3 shots in one node: shot 1 keeps the full reference sockets; shots 2-3 are panel-edited and inherit shot 1's references by default.  Output = upstream chain + this group's active shots; chain groups into the Composer's 分镜组链 to lift the 8-shot ceiling.  Project-bundle caching is automatically compatible (same plan channel after flattening).",
+    "inputs": {
+      "group_in": {
+        "name": "前序分镜",
+        "tooltip": "Output of the previous shot group (chain end-to-end).  The chain carries order and the reference context: each shot's 参考 toggle defaults to inherit, pulling the nearest declared upstream references when the shot has no own wiring; prompts/LoRA/audio modes/first-last frames never cross groups."
+      },
+      "group_json": {
+        "name": "分镜组状态",
+        "tooltip": "Per-shot panel state (prompt/duration/audio mode/LoRA/inherit toggles) - do not hand-edit."
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "分镜序列",
+        "tooltip": "Upstream chain + this group's active shots.  Connect to the Composer's 分镜序列 input, or to the next group's 上游分镜组."
       }
     }
   },
@@ -160,6 +247,10 @@
         "options": {
           "native_flow": "Dual-clock default (shift12/3)"
         }
+      },
+      "sharpness_anchor": {
+        "name": "Sharpness Anchor",
+        "tooltip": "Sharpness anchor (proven against long-film softening): decodes each shot last frame after sampling as an extra reference for the next shot - temporal attention matches sharpness against real previous-frame stats, blocking per-hop drift. Coexists with manual refs."
       }
     },
     "outputs": {
@@ -212,9 +303,10 @@
       "carry_source": {
         "name": "Carry Source",
         "options": {
-          "anchor": "Anchor to first pass (no compounding)",
+          "anchor": "Anchor to upscaled first pass (no compounding)",
           "chained": "Chain refined output",
-          "none": "none (no carry, diagnostic)"
+          "none": "none (no carry, diagnostic)",
+          "hybrid": "Hybrid (continuity + anti-drift balance)"
         }
       },
       "context_noise": {
@@ -241,58 +333,15 @@
         "name": "二采采样器",
         "tooltip": "Refine sampler. lcm/standard names = comfy native FLOW_AV route (aligned with the pass-1 pika official route); dual_clock_euler = compatibility route."
       },
-      "upscale_model": {
-        "name": "放大模型",
-        "tooltip": "Internal learned upscale model (comfy official latent_upscale_models folder); used with scale > 1."
-      },
-      "upscale_scale": {
-        "name": "放大倍率",
-        "tooltip": "1.0 = no upscale (input must already be upscaled); >1 = learned upscale inside the node before per-shot refine."
+      "carry_blend": {
+        "name": "Carry Blend",
+        "tooltip": "Hybrid carry only: head = blend*previous refined tail + (1-blend)*upscaled anchor tail. 1.0 = pure chained, 0.0 = pure anchor."
       }
     },
     "outputs": {
       "0": {
         "name": "AV 潜空间",
         "tooltip": "The whole upscaled AV latent (with lk_layout) - wire into the AV decode node."
-      }
-    }
-  },
-  "LKH3ReferenceFocus": {
-    "display_name": "MiniMax-H3 Reference Focus (LK)",
-    "description": "Preprocesses a reference photo: face detection, tight identity crops, identity sheet packing.",
-    "inputs": {
-      "image": {
-        "name": "image"
-      },
-      "mode": {
-        "name": "mode",
-        "options": {
-          "face_sheet": "Face sheet",
-          "face_main": "Main face",
-          "face_pick": "Pick face N",
-          "center_square": "Center square",
-          "passthrough": "Passthrough"
-        }
-      },
-      "faces": {
-        "name": "faces"
-      },
-      "margin": {
-        "name": "margin"
-      },
-      "cell": {
-        "name": "cell"
-      },
-      "confidence": {
-        "name": "confidence"
-      },
-      "face_index": {
-        "name": "Face Index"
-      }
-    },
-    "outputs": {
-      "0": {
-        "name": "image"
       }
     }
   },
@@ -333,6 +382,14 @@
       "range_end": {
         "name": "Range End",
         "tooltip": "Auto-narrows to the number of connected shots."
+      },
+      "project_dir": {
+        "name": "Project Directory",
+        "tooltip": "Per-shot cache directory (leave empty to auto-use a per-film subfolder under output/LK_H3_projects/): bundles are created per film automatically - edit one shot, only that shot re-runs. Bundle content is fully regenerable and stale bundles are swept automatically (LK_BUNDLE_CACHE_GB default 16GB, 0=off; LK_BUNDLE_CACHE_DAYS by age, default off). LK_SEGMENT_CACHE=0 disables caching entirely."
+      },
+      "shot_group_chain": {
+        "name": "分镜序列",
+        "tooltip": "Chain of shot groups: connect a 分镜组's 分镜序列 output (chain multiple groups end-to-end).  Order = shots 1-8 first, then each chained group in order; lifts the 8-shot ceiling."
       }
     },
     "outputs": {
@@ -359,6 +416,38 @@
       "5": {
         "name": "解码设置",
         "tooltip": "CLIP + 视频 VAE + 音频 VAE 捆绑 — 一根线接本包 分段引导/二跑分段精修/AV 解码 的 解码设置 输入。"
+      }
+    }
+  },
+  "LKH3AVDiskDecode": {
+    "display_name": "MiniMax-H3 AV Disk Decode (LK)",
+    "description": "Decodes the packed AV latent chunk-by-chunk through the model's own temporal chunk protocol straight to disk: memory bounded to one decoded chunk (no film-length ceiling), per-segment H.264 encodes pipelined beside the GPU, assembled into one MP4 via stream-copy concat.",
+    "inputs": {
+      "av_latent": {
+        "name": "AV Latent",
+        "tooltip": "Packed AV latent from segmented sampling (or the refine pass); must carry lk_layout."
+      },
+      "runtime": {
+        "name": "Decode Settings",
+        "tooltip": "CLIP + video/audio VAE bundle — connect from the composer's 解码设置 output."
+      },
+      "filename_prefix": {
+        "name": "Filename Prefix",
+        "tooltip": "Output filename prefix, may include a subfolder (e.g. LK_H3/MiniMaxH3); follows ComfyUI counter naming."
+      },
+      "crf": {
+        "name": "CRF Quality",
+        "tooltip": "H.264 quality (lower = better quality, larger file); 0 = lossless."
+      },
+      "keep_segments": {
+        "name": "Keep Segments",
+        "tooltip": "Keep the per-segment mp4 files and the concat list (for debugging chunk joins)."
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "Video",
+        "tooltip": "The finished MP4. Written to the output directory with a preview; only feed this to downstream nodes that need a video object (saving it again would re-encode)."
       }
     }
   }

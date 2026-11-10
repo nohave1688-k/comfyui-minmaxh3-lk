@@ -28,12 +28,10 @@ const imageSlots = ["first_frame", "last_frame", ...Array.from({ length: 9 }, (_
 const videoSlots = Array.from({ length: 3 }, (_, i) => `ref_video_${i + 1}`);
 const audioSlots = ["hybrid_audio", ...Array.from({ length: 3 }, (_, i) => `ref_audio_${i + 1}`)];
 const mediaSlots = [...imageSlots, ...videoSlots, ...audioSlots];
-const REFMOD_LIBRARY_ROUTE = "/lk/refmods/library";
 const MAX_SEGMENTS = 8;
 const MAX_SEG_IMAGES = 6;
 const MAX_SEG_VIDEOS = 2;
 const MAX_SEG_AUDIOS = 3;
-const MAX_SEG_MODS = 8;
 const MAX_SEG_LORAS = 4;
 const SEGMENT_LORA_ROUTE = "/lk/minimax_h3/loras";
 
@@ -47,15 +45,10 @@ const DOM_TRANSLATIONS = {
     "Mute video": "不参考音频",
     "Unmute video": "参考音频",
     "None": "无",
-    // RefMod library picker (detached modal dialog)
-    "RefMod library": "RefMod 库",
-    "Search RefMods": "搜索 RefMod",
+
     "Refresh": "刷新",
     "Loading": "加载中",
-    "No matching RefMods": "没有匹配的 RefMod",
-    "No RefMods found": "未找到 RefMod，请先用 Create H3 RefMod 生成",
-    "Add RefMod": "＋ 添加 RefMod",
-    "strength": "强度",
+
     "Add LoRA": "＋ LoRA",
     // Long video segment editor
     "Long video segments": "长视频分段",
@@ -228,10 +221,6 @@ function hideWidget(w) {
     w.hidden = true; w.options = w.options || {}; w.options.hidden = true;
     w.computeSize = () => [0, -4]; w.serialize = true;
 }
-function make(tag, css = {}, text = "") {
-    const el = document.createElement(tag); Object.assign(el.style, css);
-    if (text) el.textContent = text; return el;
-}
 function fileUrl(name) {
     if (!name || name === "(none)") return "";
     const parts = String(name).replaceAll("\\", "/").split("/").filter(Boolean);
@@ -240,304 +229,15 @@ function fileUrl(name) {
     const path = `/view?${params.toString()}`;
     return typeof api.apiURL === "function" ? api.apiURL(path) : path;
 }
-async function uploadFile(file) {
+async function uploadFile(file, subfolder = "") {
     const body = new FormData(); body.append("image", file, file.name); body.append("type", "input");
+    if (subfolder) body.append("subfolder", subfolder);
     const response = await api.fetchApi("/upload/image", { method: "POST", body });
     if (!response.ok) throw new Error(`Upload failed: ${response.status}`);
     const result = await response.json();
     return [result.subfolder, result.name].filter(Boolean).join("/");
 }
 
-// ── RefMod library picker ───────────────────────────────────────────────────
-// The picker lists the mods the RefMod pack reports on /lk/refmods/library.
-// It is a detached centered modal (document-level), never an in-node overlay,
-// so it cannot interfere with canvas hit-testing.
-let refmodLibraryCache = null;
-async function loadRefModLibrary(force = false) {
-    if (refmodLibraryCache && !force) return refmodLibraryCache;
-    try {
-        const response = await api.fetchApi(`${REFMOD_LIBRARY_ROUTE}${force ? `?t=${Date.now()}` : ""}`, { cache: "no-store" });
-        const entries = response.ok ? await response.json() : [];
-        refmodLibraryCache = Array.isArray(entries) ? entries : [];
-    } catch (error) {
-        console.error("[MiniMax H3 Integration] RefMod library unavailable:", error);
-        refmodLibraryCache = [];
-    }
-    return refmodLibraryCache;
-}
-
-function openRefModPicker(onPick) {
-    const overlay = make("div"); overlay.className = "ghh3-refmod-overlay";
-    const dialog = make("div"); dialog.className = "ghh3-refmod-dialog";
-    const head = make("div"); head.className = "ghh3-refmod-head";
-    const title = make("div", {}, t("RefMod library")); title.className = "ghh3-refmod-title";
-    const refresh = make("button", {}, t("Refresh")); refresh.className = "ghh3-refmod-refresh";
-    const close = make("button", {}, "×"); close.className = "ghh3-refmod-close";
-    head.append(title, refresh, close);
-    const search = document.createElement("input");
-    search.className = "ghh3-refmod-search"; search.type = "search"; search.placeholder = t("Search RefMods");
-    const list = make("div"); list.className = "ghh3-refmod-list";
-    const status = make("div", {}, t("Loading")); status.className = "ghh3-refmod-status";
-    dialog.append(head, search, status, list);
-    overlay.appendChild(dialog);
-    document.body.appendChild(overlay);
-    const previousFocus = document.activeElement;
-    let entries = [];
-
-    const renderList = () => {
-        const query = search.value.trim().toLowerCase();
-        list.replaceChildren();
-        const visible = entries
-            .filter(entry => entry && entry.kind !== "audio" && entry.visuals !== 0)
-            .filter(entry => !query
-                || String(entry.name || "").toLowerCase().includes(query)
-                || String(entry.concept || "").toLowerCase().includes(query)
-                || String(entry.description || "").toLowerCase().includes(query));
-        status.textContent = visible.length ? "" : (entries.length ? t("No matching RefMods") : t("No RefMods found"));
-        for (const entry of visible) {
-            const row = make("button"); row.className = "ghh3-refmod-row"; row.type = "button";
-            const name = make("span", {}, entry.name); name.className = "ghh3-refmod-name";
-            const meta = make("span", {}, [
-                entry.kind,
-                entry.visuals > 1 ? `${entry.visuals} <Video>` : "",
-                entry.tokens ? `${entry.tokens} tok` : "",
-                entry.concept,
-            ].filter(Boolean).join(" · "));
-            meta.className = "ghh3-refmod-meta";
-            row.append(name, meta);
-            row.onclick = () => { dismiss(); onPick(entry); };
-            list.appendChild(row);
-        }
-    };
-    const load = async (force) => {
-        status.textContent = t("Loading");
-        entries = (await loadRefModLibrary(force)).map(entry => ({ ...entry }));
-        renderList();
-    };
-    const dismiss = () => {
-        overlay.remove();
-        document.removeEventListener("keydown", onKey, true);
-        previousFocus?.focus?.({ preventScroll: true });
-    };
-    const onKey = event => {
-        if (event.key === "Escape") { event.stopPropagation(); dismiss(); }
-        if (event.key === "Enter" && document.activeElement === search && list.firstChild) list.firstChild.click();
-    };
-    refresh.onclick = () => load(true);
-    close.onclick = dismiss;
-    search.oninput = renderList;
-    overlay.onpointerdown = event => { if (event.target === overlay) dismiss(); };
-    document.addEventListener("keydown", onKey, true);
-    search.focus();
-    load(false);
-    return dismiss;
-}
-
-// ── 项目束接回（load project bundle）───────────────────────────────────────
-// "变相的图片拖入"：束里的 workflow.json 是跑片时的完整工作流快照；
-// 接回 = 指向文件夹 → 恢复画布 → 弹窗给出缓存状态与参考回填。
-
-const BUNDLE_ROUTES = {
-    inspect: "/lk/minimax_h3/bundle/inspect",
-    restoreRefs: "/lk/minimax_h3/bundle/restore_refs",
-    recent: "/lk/minimax_h3/bundle/recent",
-};
-
-function _bundleModal(titleText) {
-    ensureRefmodPickerStyle();
-    const overlay = make("div"); overlay.className = "ghh3-refmod-overlay";
-    const dialog = make("div"); dialog.className = "ghh3-refmod-dialog";
-    const head = make("div"); head.className = "ghh3-refmod-head";
-    const title = make("div", {}, titleText); title.className = "ghh3-refmod-title";
-    const close = make("button", {}, "×"); close.className = "ghh3-refmod-close";
-    head.append(title, close);
-    const body = make("div"); body.className = "ghh3-refmod-list"; body.style.minHeight = "80px";
-    const status = make("div"); status.className = "ghh3-refmod-status";
-    dialog.append(head, status, body);
-    overlay.appendChild(dialog);
-    document.body.appendChild(overlay);
-    const previousFocus = document.activeElement;
-    const dismiss = () => {
-        overlay.remove();
-        document.removeEventListener("keydown", onKey, true);
-        previousFocus?.focus?.({ preventScroll: true });
-    };
-    const onKey = event => { if (event.key === "Escape") { event.stopPropagation(); dismiss(); } };
-    close.onclick = dismiss;
-    overlay.onpointerdown = event => { if (event.target === overlay) dismiss(); };
-    document.addEventListener("keydown", onKey, true);
-    return { overlay, dialog, body, status, dismiss };
-}
-
-function _slotToInputName(slot) {
-    const m = /^shot(\d+)_(first_frame|last_frame|img(\d+)|vid(\d+)|aud(\d+))$/.exec(slot || "");
-    if (!m) return null;
-    const n = m[1];
-    if (m[2] === "img") return { shot: n, input: `ref_image_${m[3]}` };
-    if (m[2] === "vid") return { shot: n, input: `ref_video_${m[4]}` };
-    if (m[2] === "aud") return { shot: n, input: `ref_audio_${m[5]}` };
-    return { shot: n, input: m[2] };
-}
-
-// 束参考 → 画布上的原始上传文件名（LoadImage/LoadVideo 等 widget 值），
-// 供回填时按原名拷回 input 目录。
-function resolveRefTargets(refs) {
-    const graph = app.graph;
-    const composer = (graph?._nodes || []).find(node => node.type === "LKH3Composer");
-    const targets = [];
-    if (!composer) return targets;
-    const seen = new Set();
-    for (const ref of refs || []) {
-        for (const slot of ref.slots || []) {
-            const mapped = _slotToInputName(slot);
-            if (!mapped) continue;
-            const composerInput = (composer.inputs || []).find(inp => inp.name === `shot_${mapped.shot}`);
-            const composerLink = composerInput ? graph.links[composerInput.link] : null;
-            const shotNode = composerLink ? graph.getNodeById(composerLink.origin_id) : null;
-            const shotInput = shotNode?.inputs?.find(inp => inp.name === mapped.input);
-            const shotLink = shotInput ? graph.links[shotInput.link] : null;
-            const srcNode = shotLink ? graph.getNodeById(shotLink.origin_id) : null;
-            const widget = (srcNode?.widgets || []).find(w => typeof w.value === "string" && w.value);
-            const target = widget?.value;
-            if (typeof target === "string" && target && !seen.has(ref.file + "|" + target)) {
-                seen.add(ref.file + "|" + target);
-                targets.push({ file: ref.file, target, slot });
-            }
-        }
-    }
-    return targets;
-}
-
-function showBundleSummary(data) {
-    const modal = _bundleModal(`项目束 · ${data.film_key || ""}`);
-    modal.status.textContent = data.path || "";
-    const manifest = data.manifest || {};
-    const identity = manifest.identity || {};
-    const refs = data.refs || [];
-    const block = (html) => {
-        const div = make("div");
-        div.style.cssText = "font-size:11px;line-height:1.6;white-space:pre-wrap;color:#d7e3ec";
-        div.innerHTML = html;
-        modal.body.appendChild(div);
-    };
-    const firstEntries = Object.keys(manifest.first || {});
-    const secondEntries = Object.keys(manifest.second || {});
-    block([
-        `画布 ${identity.width}×${identity.height} · ${identity.segment_count} 镜`,
-        `一跑缓存：${firstEntries.length ? firstEntries.length + " 段已入束" : "空"} · 二跑缓存：${secondEntries.length ? secondEntries.length + " 段已入束" : "空"}`,
-        "",
-        "参考媒体：",
-    ].join("\n"));
-    const missing = refs.filter(ref => ref.status !== "ok");
-    if (!refs.length) block("（无）");
-    for (const ref of refs) {
-        const color = ref.status === "ok" ? "#7fd39a" : ref.status === "missing" ? "#e2a15c" : "#e27d5c";
-        const label = ref.status === "ok" ? "✓ 就绪" : ref.status === "missing" ? "缺（input 目录）" : "已变更";
-        const row = make("div");
-        row.style.cssText = "font-size:11px;color:#d7e3ec;padding:2px 0";
-        row.innerHTML = `<span style="color:${color}">${label}</span> ${ref.file} <span style="color:#8298a9">[${(ref.slots || []).join(", ")}]</span>`;
-        modal.body.appendChild(row);
-    }
-    const actions = make("div");
-    actions.style.cssText = "display:flex;gap:8px;margin-top:10px";
-    if (missing.length) {
-        const backfill = make("button", {}, "回填缺失参考");
-        backfill.className = "ghh3-refmod-refresh";
-        backfill.onclick = async () => {
-            const targets = resolveRefTargets(missing);
-            if (!targets.length) {
-                modal.status.textContent = "无法从画布解析原始上传文件名（参考可能来自上游节点链，请手动重选）";
-                return;
-            }
-            backfill.disabled = true;
-            const response = await api.fetchApi(BUNDLE_ROUTES.restoreRefs, {
-                method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ path: data.path, jobs: targets }),
-            });
-            const result = await response.json().catch(() => ({}));
-            const ok = (result.results || []).filter(item => item.status === "restored").length;
-            backfill.disabled = false;
-            modal.status.textContent = `回填完成 ${ok}/${targets.length}（hash 校验通过）`;
-            for (const item of result.results || []) {
-                for (const ref of refs) {
-                    if (ref.file === item.file && item.status === "restored") ref.status = "ok";
-                }
-            }
-            backfill.remove();
-        };
-        actions.appendChild(backfill);
-    }
-    const done = make("button", {}, "完成");
-    done.className = "ghh3-refmod-refresh";
-    done.onclick = modal.dismiss;
-    actions.appendChild(done);
-    modal.body.appendChild(actions);
-}
-
-async function openBundleLoader() {
-    const modal = _bundleModal("接回项目（打开项目束）");
-    const input = document.createElement("input");
-    input.className = "ghh3-refmod-search";
-    input.type = "text";
-    input.placeholder = "粘贴项目束文件夹路径，例如 F:\\…\\output\\LK_H3_projects\\a3f9c2d1";
-    modal.body.appendChild(input);
-    const submit = make("button", {}, "接回（恢复工作流）");
-    submit.className = "ghh3-refmod-refresh";
-    submit.style.marginBottom = "8px";
-    modal.body.appendChild(submit);
-    const recentTitle = make("div", {}, "最近项目：");
-    recentTitle.style.cssText = "color:#8298a9;font-size:10px;margin:6px 0 2px";
-    modal.body.appendChild(recentTitle);
-    const recentList = make("div"); recentList.className = "ghh3-refmod-list";
-    modal.body.appendChild(recentList);
-
-    const load = async () => {
-        recentList.replaceChildren();
-        try {
-            const response = await api.fetchApi(`${BUNDLE_ROUTES.recent}?t=${Date.now()}`, { cache: "no-store" });
-            const data = response.ok ? await response.json() : {};
-            for (const entry of data.recent || []) {
-                if (!entry.path) continue;
-                const row = make("button"); row.className = "ghh3-refmod-row"; row.type = "button";
-                const name = make("span", {}, entry.path); name.className = "ghh3-refmod-name";
-                const meta = make("span", {}, entry.updated || ""); meta.className = "ghh3-refmod-meta";
-                row.append(name, meta);
-                row.onclick = () => { input.value = entry.path; submit.click(); };
-                recentList.appendChild(row);
-            }
-            if (!recentList.firstChild) recentList.textContent = "（暂无记录）";
-        } catch (error) {
-            recentList.textContent = "读取失败";
-        }
-    };
-
-    submit.onclick = async () => {
-        const path = input.value.trim().replace(/^"(.*)"$/, "$1");
-        if (!path) { modal.status.textContent = "请填写项目束路径"; return; }
-        modal.status.textContent = "读取中…";
-        try {
-            const response = await api.fetchApi(BUNDLE_ROUTES.inspect, {
-                method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ path }),
-            });
-            const data = await response.json().catch(() => ({}));
-            if (!response.ok) { modal.status.textContent = data.error || "读取失败"; return; }
-            if (!data.workflow) {
-                modal.status.textContent = "该束没有 workflow.json 快照——需用 AV落盘解码 跑过一次后才有；可手动打开原工作流继续";
-                return;
-            }
-            await app.loadGraphData(JSON.parse(data.workflow));
-            // 只有恢复成功才关弹窗——恢复抛错时错误要留在这里可见。
-            modal.dismiss();
-            showBundleSummary(data);
-        } catch (error) {
-            modal.status.textContent = `接回失败：${error}`;
-        }
-    };
-    input.addEventListener("keydown", event => { if (event.key === "Enter") submit.click(); });
-    input.focus();
-    load();
-}
 
 // ── shared drawing helpers for the canvas chips widget ─────────────────────
 function roundRectPath(ctx, x, y, w, h, r) {
@@ -549,29 +249,6 @@ function roundRectPath(ctx, x, y, w, h, r) {
     ctx.arcTo(x, y + h, x, y, radius);
     ctx.arcTo(x, y, x + w, y, radius);
     ctx.closePath();
-}
-
-let refmodPickerStyleInstalled = false;
-function ensureRefmodPickerStyle() {
-    if (refmodPickerStyleInstalled || typeof document === "undefined") return;
-    const style = make("style");
-    style.textContent = `
-      .ghh3-refmod-overlay{position:fixed;inset:0;z-index:10300;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.62);font:12px Arial,sans-serif}
-      .ghh3-refmod-dialog{width:min(520px,calc(100vw - 30px));max-height:min(620px,calc(100vh - 60px));display:flex;flex-direction:column;padding:12px;background:#17222c;color:#d7e3ec;border:1px solid #365161;border-radius:9px;box-shadow:0 18px 52px rgba(0,0,0,.55);box-sizing:border-box}
-      .ghh3-refmod-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
-      .ghh3-refmod-title{font-size:13px;flex:1;white-space:nowrap}
-      .ghh3-refmod-refresh{border:1px solid #3a5363;border-radius:4px;background:#1d2b36;color:#cfe0ea;padding:3px 8px;cursor:pointer;font-size:10px}
-      .ghh3-refmod-close{border:0;background:transparent;color:#cfe0ea;font-size:18px;line-height:1;cursor:pointer;padding:0 3px}
-      .ghh3-refmod-search{width:100%;box-sizing:border-box;margin-bottom:6px;padding:6px 8px;background:#12202c;color:#dbe8f1;border:1px solid #354b5d;border-radius:4px;font:12px Arial,sans-serif}
-      .ghh3-refmod-status{color:#7f93a4;font-size:10px;min-height:14px;margin-bottom:4px}
-      .ghh3-refmod-list{overflow:auto;display:flex;flex-direction:column;gap:4px;min-height:60px}
-      .ghh3-refmod-row{display:flex;align-items:center;gap:8px;width:100%;border:1px solid #31485c;border-radius:5px;background:#1a2938;color:#e7f0f7;padding:7px 9px;text-align:left;cursor:pointer;font:inherit}
-      .ghh3-refmod-row:hover{border-color:#18bdd3;background:#1e3345}
-      .ghh3-refmod-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px}
-      .ghh3-refmod-meta{font-size:9px;color:#8298a9;white-space:nowrap}
-    `;
-    document.head.appendChild(style);
-    refmodPickerStyleInstalled = true;
 }
 
 function createPanel(node) {
@@ -601,7 +278,7 @@ function createPanel(node) {
     const segmentClone = value => JSON.parse(JSON.stringify(value));
     const defaultSegment = (duration = 5) => ({
         duration: Math.max(2, Math.min(30, Math.round(Number(duration) || 5))),
-        prompt: "", first_frame: "", last_frame: "", images: [], videos: [], audios: [], mods: [], loras: [],
+        prompt: "", first_frame: "", last_frame: "", images: [], videos: [], audios: [], loras: [],
     });
     const normalizeSegment = (raw, index) => {
         const base = defaultSegment(raw?.duration);
@@ -624,13 +301,6 @@ function createPanel(node) {
                     trimEnd: item?.trimEnd == null ? null : Number(item.trimEnd),
                 }))
                 .filter(item => item.name).slice(0, MAX_SEG_AUDIOS),
-            mods: (Array.isArray(raw?.mods) ? raw.mods : [])
-                .map(item => (typeof item === "string" ? { name: item, strength: 1, count: 1 } : {
-                    name: String(item?.name || ""),
-                    strength: Math.max(0.05, Math.min(1, Number(item?.strength) || 1)),
-                    count: Math.max(1, Math.min(256, Math.round(Number(item?.count) || 1))),
-                }))
-                .filter(item => item.name && item.name !== "(none)" && item.name !== "None").slice(0, MAX_SEG_MODS),
             loras: (Array.isArray(raw?.loras) ? raw.loras : [])
                 .map(item => (typeof item === "string" ? { name: item, strength_model: 1 } : {
                     name: String(item?.name || ""),
@@ -731,23 +401,15 @@ function createPanel(node) {
     }
 
     // ── segment tag numbering (must match the backend's dense numbering) ─────
-    const segmentModTags = seg => (seg.mods || []).reduce((total, item) => total + (item.count || 1), 0);
     const segmentUnmutedVideos = seg => (seg.videos || []).filter(item => !item.muted).length;
     const segmentKeyframeCount = index => (segments[index]?.first_frame ? 1 : 0)
         + (segments[index]?.last_frame ? 1 : 0);
     function segmentTagText(seg, index, kind, refIndex) {
-        const mods = segmentModTags(seg);
         if (kind === "first_frame") return "<Picture 1>";
         if (kind === "last_frame") return `<Picture ${seg.first_frame ? 2 : 1}>`;
         if (kind === "image") return `<Picture ${segmentKeyframeCount(index) + refIndex + 1}>`;
-        if (kind === "video") return `<Video ${mods + refIndex + 1}>`;
+        if (kind === "video") return `<Video ${refIndex + 1}>`;
         if (kind === "audio") return `<Audio ${segmentUnmutedVideos(seg) + refIndex + 1}>`;
-        if (kind === "mod") {
-            const start = 1 + (seg.mods || []).slice(0, refIndex)
-                .reduce((total, item) => total + (item.count || 1), 0);
-            const count = seg.mods?.[refIndex]?.count || 1;
-            return Array.from({ length: count }, (_, offset) => `<Video ${start + offset}>`).join(" ");
-        }
         return "";
     }
 
@@ -829,15 +491,6 @@ function createPanel(node) {
             }
         };
         input.click();
-    }
-    function addSegmentMod(seg, entry) {
-        if (!entry || !entry.name || seg.mods.length >= MAX_SEG_MODS) return;
-        seg.mods.push({
-            name: entry.name,
-            strength: 1,
-            count: Math.max(1, Math.min(256, Math.round(Number(entry.visuals) || 1))),
-        });
-        syncSegmentState();
     }
 
     // ── prompt tag insertion into the native multiline widget ────────────────
@@ -998,8 +651,6 @@ function createPanel(node) {
         badgeSkipText: "#9fc2cf",
         noteText: "#7f93a4",
         sizeText: "#0db5e8",
-        strengthBox: "#12202c",
-        strengthBorder: "#354b5d",
     };
     const thumbCache = new Map();
     function segmentThumb(name) {
@@ -1033,7 +684,6 @@ function createPanel(node) {
         const drag = {
             active: false, started: false, pending: null,
             downX: 0, downY: 0, list: null, fromIdx: -1, hoverIdx: -1,
-            modDrag: null,
         };
         let regions = [];
 
@@ -1049,7 +699,7 @@ function createPanel(node) {
             }));
             items.push({ kind: "add", label: `＋${t("Picture")}`, act: { type: "upload", arg: "image" }, disabled: (seg.images || []).length >= MAX_SEG_IMAGES });
             (seg.videos || []).forEach((item, i) => items.push({
-                kind: "video", label: `${t("Video")} ${segmentModTags(seg) + i + 1}`, tagKind: "video",
+                kind: "video", label: `${t("Video")} ${i + 1}`, tagKind: "video",
                 value: item.name, muted: !!item.muted, draggable: true, list: "videos", idx: i,
             }));
             items.push({ kind: "add", label: `＋${t("Video")}`, act: { type: "upload", arg: "video" }, disabled: (seg.videos || []).length >= MAX_SEG_VIDEOS });
@@ -1058,10 +708,6 @@ function createPanel(node) {
                 value: item.name, draggable: true, list: "audios", idx: i,
             }));
             items.push({ kind: "add", label: `＋${t("Audio")}`, act: { type: "upload", arg: "audio" }, disabled: (seg.audios || []).length >= MAX_SEG_AUDIOS });
-            (seg.mods || []).forEach((item, i) => items.push({
-                kind: "mod", label: `MOD ${item.name}`, tagKind: "mod", value: item.name,
-                strength: item.strength, list: "mods", idx: i,
-            }));
             return items;
         }
 
@@ -1071,7 +717,6 @@ function createPanel(node) {
             let extra = 6;
             if (item.thumb) extra += 18;
             if (item.kind === "video") extra += 15;
-            if (item.kind === "mod") extra += 40;
             if (item.kind !== "add") extra += 13;
             return Math.ceil(10 + textWidth + extra);
         }
@@ -1203,21 +848,6 @@ function createPanel(node) {
                 ctx.fillText(item.muted ? "🔇" : "🔊", muteX + 2, cy + CHIP_H / 2 + 0.5);
                 regions.push({ x: muteX, y: cy + 1, w: 15, h: CHIP_H - 2, act: "mute", idx: item.idx });
             }
-            if (item.kind === "mod") {
-                const strength = item.strength ?? 1;
-                const boxW = 30;
-                const boxX = x + cw - 12 - 30;
-                ctx.fillStyle = CHIP_COLORS.strengthBox;
-                ctx.strokeStyle = CHIP_COLORS.strengthBorder;
-                roundRectPath(ctx, boxX, cy + 3, boxW, CHIP_H - 6, 3);
-                ctx.fill();
-                ctx.stroke();
-                ctx.fillStyle = CHIP_COLORS.chipText;
-                ctx.font = "9px Arial,sans-serif";
-                ctx.textAlign = "center";
-                ctx.fillText(Number(strength).toFixed(2), boxX + boxW / 2, cy + CHIP_H / 2 + 0.5);
-                regions.push({ x: boxX, y: cy + 1, w: boxW, h: CHIP_H - 2, act: "mod-strength", idx: item.idx, list: item.list });
-            }
             // remove (×) occupies the right edge of every data chip
             const removeX = x + cw - 12;
             ctx.fillStyle = CHIP_COLORS.chipRemove;
@@ -1290,11 +920,10 @@ function createPanel(node) {
                 for (const item of rowItems) drawChip(ctx, item, cy);
                 cy += CHIP_H + ROW_GAP;
             }
-            // footer: +LoRA / +RefMod / refresh — then the latent hint on the last segment
+            // footer: +LoRA / refresh — then the latent hint on the last segment
             ctx.font = CHIP_FONT;
             const footer = [];
             if (seg.loras.length < MAX_SEG_LORAS) footer.push({ label: t("Add LoRA"), act: "add-lora" });
-            if (seg.mods.length < MAX_SEG_MODS) footer.push({ label: t("Add RefMod"), act: "add-refmod" });
             footer.push({ label: "↻", act: "refresh-loras" });
             let fx = CHIP_PAD;
             for (const item of footer) {
@@ -1325,7 +954,6 @@ function createPanel(node) {
             drag.list = null;
             drag.fromIdx = -1;
             drag.hoverIdx = -1;
-            drag.modDrag = null;
         }
         function commitReorder(listName, fromIdx, hoverIdx) {
             if (!listName || hoverIdx < 0 || fromIdx < 0 || fromIdx === hoverIdx) return;
@@ -1364,11 +992,6 @@ function createPanel(node) {
                     }
                     break;
                 }
-                case "add-refmod": {
-                    ensureRefmodPickerStyle();
-                    openRefModPicker(entry => addSegmentMod(seg, entry));
-                    break;
-                }
                 case "refresh-loras": refreshSegmentLoras(); break;
                 default: break;
             }
@@ -1386,20 +1009,9 @@ function createPanel(node) {
                 drag.list = drag.active ? region.list : null;
                 drag.fromIdx = drag.active ? region.idx : -1;
                 drag.hoverIdx = drag.fromIdx;
-                if (region?.act === "mod-strength") {
-                    drag.modDrag = { idx: region.idx, startX: lx, start: seg.mods?.[region.idx]?.strength ?? 1 };
-                }
                 return true;
             }
             if (type === "pointermove") {
-                if (drag.modDrag) {
-                    const item = seg.mods?.[drag.modDrag.idx];
-                    if (item) {
-                        item.strength = Math.max(0.05, Math.min(1, drag.modDrag.start + (lx - drag.modDrag.startX) / 150));
-                        scheduleSegmentSync();
-                        return true;
-                    }
-                }
                 if (drag.active) {
                     if (!drag.started && Math.abs(lx - drag.downX) + Math.abs(ly - drag.downY) > 6) drag.started = true;
                     if (drag.started) {
@@ -1854,7 +1466,7 @@ function createPanel(node) {
 // outside the range collapse to their dimmed chips header (data preserved).
 // ── MiniMaxH3分镜 (LKH3Shot) ─────────────────────────────────────────────────
 // One compact shot node: duration/prompt/media live on the schema (sockets for
-// media), while per-shot LoRA and RefMod rows are managed here through the
+// media), while per-shot LoRA rows are managed here through the
 // hidden shot_json widget.
 function createShotPanel(node) {
     const shotJsonW = widget(node, "shot_json");
@@ -1865,10 +1477,13 @@ function createShotPanel(node) {
     node.properties = node.properties || {};
 
     let loras = [];
-    let mods = [];
+    // audio_mode 曾是裸标识符：非严格模式下首次赋值静默落成 window 全局，
+    // 但全局尚不存在时的首次"读取"（syncShotJson 序列化）就是
+    // ReferenceError——看门狗在加载窗口触发 shot_json 回调后踩中过一次。
+    // 正式声明，彻底排掉这颗雷。
+    let audioMode = "";
     let loras_fetched = null;
     let loras_fetching = false;
-    let refmod_library = null;
     let restoring = true;
     let restoreEpoch = 0;
     let syncTimer = null;
@@ -1881,9 +1496,8 @@ function createShotPanel(node) {
             if (!source) continue;
             try {
                 const parsed = JSON.parse(source);
-                if (parsed && Array.isArray(parsed.loras) && Array.isArray(parsed.mods)) {
+                if (parsed && Array.isArray(parsed.loras)) {
                     loras = parsed.loras;
-                    mods = parsed.mods;
                     audioMode = typeof parsed.audio_mode === "string"
                         ? parsed.audio_mode.trim().toLowerCase() : "";
                     return true;
@@ -1892,7 +1506,6 @@ function createShotPanel(node) {
         }
         if (!strict) {
             loras = [];
-            mods = [];
             audioMode = "";
         }
         return false;
@@ -1902,7 +1515,7 @@ function createShotPanel(node) {
         // widget value arrives asynchronously and an early write would clobber
         // it with the pre-restore (empty) state.
         if (restoring) return;
-        const value = JSON.stringify({ loras, mods, audio_mode: audioMode });
+        const value = JSON.stringify({ loras, audio_mode: audioMode });
         if (shotJsonW && shotJsonW.value !== value) shotJsonW.value = value;
         node.properties[stateKey] = value;
     }
@@ -1942,13 +1555,6 @@ function createShotPanel(node) {
             return loras_fetched;
         });
     }
-    async function fetchRefmodNames() {
-        if (refmod_library) return refmod_library.map(e => e.name);
-        const entries = await loadRefModLibrary();
-        refmod_library = (entries || []).filter(e => e && e.kind !== "audio" && e.visuals !== 0);
-        return refmod_library.map(e => e.name);
-    }
-
     function clearPanelWidgets() {
         for (const w of shotWidgets) {
             const at = node.widgets.indexOf(w);
@@ -2011,30 +1617,6 @@ function createShotPanel(node) {
                 scheduleSync();
             }, { min: -10, max: 10, step: 0.05, precision: 2 });
         });
-        mods.forEach((entry, i) => {
-            const names = (refmod_library || []).map(e => e.name);
-            const values = ["None", ...names];
-            if (entry.name && !values.includes(entry.name)) values.push(entry.name);
-            const combo = addRow("combo", `RefMod ${i + 1}`, entry.name || "None", v => {
-                if (restoring) return;
-                const name = !v || v === "None" ? "" : String(v);
-                if (!name) { mods.splice(i, 1); scheduleSync(); rebuildRows(); }
-                else {
-                    entry.name = name;
-                    const lib = (refmod_library || []).find(e => e.name === name);
-                    if (lib) entry.count = Math.max(1, Math.min(256, Math.round(Number(lib.visuals) || 1)));
-                    scheduleSync();
-                }
-            }, { values });
-            addRow("number", `RefMod ${i + 1} 强度`, entry.strength ?? 1, v => {
-                entry.strength = Math.max(0.05, Math.min(1, Number(v) || 1));
-                scheduleSync();
-            }, { min: 0.05, max: 1, step: 0.05, precision: 2 });
-            addRow("number", `RefMod ${i + 1} 占用`, entry.count ?? 1, v => {
-                entry.count = Math.max(1, Math.min(256, Math.round(Number(v) || 1)));
-                scheduleSync();
-            }, { min: 1, max: 256, step: 1, precision: 0 });
-        });
         if (loras.length < MAX_SEG_LORAS) addButtonRow("＋ LoRA", () => {
             if (loras.length >= MAX_SEG_LORAS) return;
             loras.push({ name: "", strength_model: 1 });
@@ -2042,25 +1624,12 @@ function createShotPanel(node) {
             rebuildRows();
             fetchLoras().then(() => rebuildRows());
         });
-        if (mods.length < MAX_SEG_MODS) addButtonRow("＋ RefMod", () => {
-            if (mods.length >= MAX_SEG_MODS) return;
-            ensureRefmodPickerStyle();
-            openRefModPicker(entry => {
-                mods.push({
-                    name: entry.name,
-                    strength: 1,
-                    count: Math.max(1, Math.min(256, Math.round(Number(entry.visuals) || 1))),
-                });
-                scheduleSync();
-                rebuildRows();
-            });
-        });
         lastRowCount = shotWidgets.length;
         fit();
     }
 
     async function refreshLibraries() {
-        await Promise.all([fetchLoras(), fetchRefmodNames().catch(() => [])]);
+        await fetchLoras();
         rebuildRows();
     }
 
@@ -2076,11 +1645,16 @@ function createShotPanel(node) {
     // the schema definition and can wipe dynamically added (serialize:false)
     // panel rows at any widget-store sync.  When the panel rows vanish while
     // the state still holds rows, re-apply them.  Cheap (a filter per 1.5s),
-    // and it keeps the LoRA/RefMod editor alive across frontend updates.
+    // and it keeps the LoRA editor alive across frontend updates.
     const panelWatchdog = setInterval(() => {
         if (!node.graph || restoring) return;
         const alive = (node.widgets || []).filter(w => w._ghh3Shot).length;
-        if (lastRowCount > 0 && alive === 0) rebuildRows();
+        if (lastRowCount > 0 && alive === 0) {
+            rebuildRows();
+            // 同一场 store 重建也会把 schema widget 重置回默认渲染——
+            // 顺路把它们的显示值拉回序列化真值。
+            resyncSchemaWidgets(node, "分镜面板重建");
+        }
     }, 1500);
 
     const oldSerialize = node.onSerialize;
@@ -2298,13 +1872,40 @@ app.registerExtension({
             };
             return;
         }
-        if (nodeData.name === "LKH3Composer") {
-            const previousComposer = nodeType.prototype.onNodeCreated;
+        if (nodeData.name === "LKH3ShotGroup") {
+            const previousGroup = nodeType.prototype.onNodeCreated;
             nodeType.prototype.onNodeCreated = function() {
-                const result = previousComposer?.apply(this, arguments);
-                if (!this._ghh3BundleButton) {
-                    const button = this.addWidget("button", "接回项目", null, () => openBundleLoader());
-                    if (button) { button.serialize = false; this._ghh3BundleButton = button; }
+                const result = previousGroup?.apply(this, arguments);
+                if (!this._ghh3GroupPanelReady) {
+                    const panel = createGroupPanel(this);
+                    if (panel) {
+                        this._ghh3GroupPanelReady = true;
+                        const prevAdded = this.onAdded;
+                        this.onAdded = function() {
+                            prevAdded?.apply(this, arguments);
+                            panel.onAdded();
+                        };
+                        const prevConfigure = this.onConfigure;
+                        this.onConfigure = function(state) {
+                            prevConfigure?.apply(this, arguments);
+                            panel.onConfigure(state);
+                        };
+                        const prevGraphConfigured = this.onGraphConfigured;
+                        this.onGraphConfigured = function() {
+                            prevGraphConfigured?.apply(this, arguments);
+                            panel.onGraphConfigured();
+                        };
+                        const prevSerialize = this.onSerialize;
+                        this.onSerialize = function(data) {
+                            prevSerialize?.apply(this, arguments);
+                            panel.onSerialize(data);
+                        };
+                        const prevRemoved = this.onRemoved;
+                        this.onRemoved = function() {
+                            prevRemoved?.apply(this, arguments);
+                            panel.onRemoved();
+                        };
+                    }
                 }
                 return result;
             };
@@ -2320,12 +1921,856 @@ app.registerExtension({
     },
 });
 
+// ── 分镜组面板 v2（LKH3ShotGroup）─────────────────────────────────────────
+// 视觉对齐 lanxi「长视频操作台」：青色描边卡片 + 头部徽章行 + 提示词框 +
+// LoRA 快速行 + 虚线「＋添加分镜」。整块面板是单个 DOM widget，
+// 状态仍双镜像（properties + group_json），后端语义不变。
+
+const GROUP_AUDIO_MODES = [
+    ["", "跟随编排"],
+    ["lock_source", "锁定原声"],
+    ["reference_only", "仅参考"],
+    ["native", "原生生成"],
+];
+const GROUP_MAX_LORAS = 4;
+// 粘贴仲裁：同页多个分镜组面板时，一次粘贴只由最近活跃的面板响应
+// （token 比对 + 活跃度门槛，避免抢 ComfyUI 原生的画布图片粘贴）。
+let lkgrpActiveToken = null;
+let lkgrpActiveTs = 0;
+const GROUP_PANEL_WIDTH = 460;
+const GROUP_MAX_SHOTS = 3;
+
+let groupLorasCache = null;
+async function fetchGroupLoras(force = false) {
+    if (groupLorasCache && !force) return groupLorasCache;
+    let names = [];
+    try {
+        for (const route of ["/object_info/LoraLoaderModelOnly", "/object_info/LoraLoader"]) {
+            const response = await api.fetchApi(route, { cache: "no-store" });
+            if (!response.ok) continue;
+            const info = await response.json();
+            for (const entry of Object.values(info || {})) {
+                const input = entry?.input?.required?.lora_name;
+                if (Array.isArray(input) && Array.isArray(input[0])) names.push(...input[0]);
+            }
+            if (names.length) break;
+        }
+    } catch (error) { /* 落到本包路由 */ }
+    if (!names.length) {
+        try {
+            const response = await api.fetchApi(`${SEGMENT_LORA_ROUTE}?t=${Date.now()}`, { cache: "no-store" });
+            const data = response.ok ? await response.json() : {};
+            if (Array.isArray(data.loras)) names = data.loras;
+        } catch (error) {
+            console.warn("[MiniMax H3 Integration] LoRA 列表不可用:", error);
+        }
+    }
+    groupLorasCache = [...new Set(names)].sort((a, b) => a.localeCompare(b));
+    return groupLorasCache;
+}
+
+let lkgrpStyleInstalled = false;
+function ensureGroupPanelStyle() {
+    if (lkgrpStyleInstalled || typeof document === "undefined") return;
+    const style = document.createElement("style");
+    style.textContent = `
+      .lkgrp-root{display:flex;flex-direction:column;gap:8px;padding:2px 2px 6px;font:12px/1.4 Arial,sans-serif;color:#e1e9ef}
+      .lkgrp-card{border:1px solid #2e6f86;border-radius:8px;background:#1a2938;overflow:hidden;box-shadow:0 0 0 1px rgba(24,189,211,.12)}
+      .lkgrp-card.lkgrp-collapsed{background:#16222d}
+      .lkgrp-card.lkgrp-empty{opacity:.45}
+      .lkgrp-head{display:flex;align-items:center;gap:6px;padding:6px 8px;background:#213548;border-bottom:1px solid #2e6f86}
+      .lkgrp-card.lkgrp-collapsed .lkgrp-head{border-bottom:0}
+      .lkgrp-badge{font-size:11px;font-weight:bold;color:#7fe3ef;white-space:nowrap}
+      .lkgrp-head .lkgrp-label{font-size:10px;color:#7f93a4;white-space:nowrap}
+      .lkgrp-badge .lkgrp-main-tag{font-size:9px;color:#0db5e8;border:1px solid #1e6f86;border-radius:4px;padding:0 4px;margin-left:4px;vertical-align:1px}
+      .lkgrp-head input[type=number],.lkgrp-head select{background:#12202c;color:#dbe8f1;border:1px solid #354b5d;border-radius:4px;font:11px Arial,sans-serif;padding:2px 4px;height:22px}
+      .lkgrp-head input[type=number]{width:52px}
+      .lkgrp-head select{max-width:96px}
+      .lkgrp-spacer{flex:1}
+      .lkgrp-toggle{border:1px solid #3a5363;border-radius:4px;background:#1d2b36;color:#cfe0ea;padding:1px 7px;cursor:pointer;font-size:10px}
+      .lkgrp-toggle:hover{border-color:#18bdd3;color:#fff}
+      .lkgrp-body{display:flex;flex-direction:column;gap:6px;padding:7px 8px 8px}
+      .lkgrp-prompt{width:100%;min-height:84px;resize:vertical;overflow:auto;box-sizing:border-box;border:1px solid #2c4356;border-radius:6px;background:#1d2731;color:#e1e9ef;padding:7px;font:12px/1.4 Arial,sans-serif;outline:none;scrollbar-width:thin;scrollbar-color:#1f3540 transparent}
+      .lkgrp-prompt::placeholder{color:#52616d}
+      .lkgrp-prompt:focus{border-color:#18bdd3}
+      .lkgrp-row{display:flex;align-items:center;gap:5px;width:100%;min-width:0}
+      .lkgrp-row select{flex:1 1 120px;min-width:0;width:auto;max-width:100%}
+      .lkgrp-row input[type=number]{flex:0 0 56px}
+      .lkgrp-row .lkgrp-x{flex:0 0 auto}
+      .lkgrp-row select{flex:1;min-width:0;background:#12202c;color:#dbe8f1;border:1px solid #354b5d;border-radius:4px;font:11px Arial,sans-serif;padding:2px 4px;height:22px}
+      .lkgrp-row input[type=number]{width:56px;background:#12202c;color:#dbe8f1;border:1px solid #354b5d;border-radius:4px;font:11px Arial,sans-serif;height:22px;padding:2px 4px}
+      .lkgrp-row .lkgrp-x{border:0;background:transparent;color:#c6d4de;font-size:12px;cursor:pointer;padding:0 3px}
+      .lkgrp-row .lkgrp-x:hover{color:#ff8f8f}
+      .lkgrp-label{font-size:10px;color:#7f93a4;white-space:nowrap}
+      .lkgrp-number{display:flex;align-items:center;border:1px solid #354b5d;border-radius:4px;overflow:hidden;background:#12202c;height:24px}
+      .lkgrp-number button{border:0;background:#1d2b36;color:#cfe0ea;width:20px;height:100%;cursor:pointer;font-size:10px;padding:0}
+      .lkgrp-number button:hover{background:#294955;color:#fff}
+      .lkgrp-number input{width:44px;height:100%;border:0;background:#12202c;color:#dbe8f1;font:11px Arial,sans-serif;text-align:center;padding:0 2px;outline:none}
+      .lkgrp-head select,.lkgrp-row select{-webkit-appearance:none;appearance:none;background-image:linear-gradient(45deg,transparent 50%,#7f93a4 50%),linear-gradient(135deg,#7f93a4 50%,transparent 50%);background-position:calc(100% - 12px) 9px,calc(100% - 7px) 9px;background-size:5px 5px;background-repeat:no-repeat;padding-right:18px}
+      .lkgrp-chip{border:1px dashed #35526a;border-radius:5px;background:#16242f;color:#9fc6d4;padding:2px 8px;cursor:pointer;font-size:10px}
+      .lkgrp-chip:hover{border-color:#18bdd3;color:#dff4f7}
+      .lkgrp-chips{display:flex;gap:5px;flex-wrap:wrap}
+      .lkgrp-add{border:1px dashed #35526a;border-radius:7px;background:transparent;color:#9fc6d4;padding:6px;cursor:pointer;font-size:11px;text-align:center;width:100%}
+      .lkgrp-badge[draggable="true"]{cursor:grab}
+      .lkgrp-badge[draggable="true"]:active{cursor:grabbing}
+      .lkgrp-mchip{cursor:grab}
+      .lkgrp-drop-target{border-color:#18bdd3 !important;box-shadow:0 0 0 2px rgba(24,189,211,.35) inset;background:#1b3142 !important}
+      .lkgrp-add:hover{border-color:#18bdd3;color:#dff4f7}
+      .lkgrp-hint{font-size:10px;color:#52616d;line-height:1.3}
+    `;
+    document.head.appendChild(style);
+    lkgrpStyleInstalled = true;
+}
+
+// ── 全局编号引擎（Composer 权威）───────────────────────────────────────────
+// 从每个 Composer 的「分镜序列」口正向遍历链：散点 = 1 镜；组 = 参与镜数
+// （enabled/有内容）。产出 (a) 激活节点集合——只有挂在 Composer 主链上的
+// 组/散点才显示全局序号（分支链不激活，防止分支导致编号混乱）；
+// (b) 每个节点的链前镜数（groupBase）。
+let lkgrpNumbering = { stamp: 0, baseByNode: new Map(), activeNodes: new Set() };
+
+function lkgrpRefreshNumbering() {
+    const baseByNode = new Map();
+    const activeNodes = new Set();
+    const composers = (app.graph?._nodes || []).filter(n => n.type === "LKH3Composer");
+    const groupInOf = (node) => {
+        // Composer 的链入口叫 shot_group_chain，组/散点叫 group_in
+        const inName = node.type === "LKH3Composer" ? "shot_group_chain" : "group_in";
+        const linkId = (node.inputs || []).find(i => i.name === inName)?.link;
+        if (linkId == null) return null;
+        const links = app.graph.links;
+        const link = typeof links.get === "function" ? links.get(linkId) : links[linkId];
+        return link ? app.graph.getNodeById(link.origin_id) : null;
+    };
+    const participating = (node) => {
+        if (node.type === "LKH3Shot") return 1;
+        if (node.type === "LKH3ShotGroup") {
+            const st = node.properties?.["gh_h3_group_state"];
+            let count = 0;
+            (st?.shots || []).forEach((s, i) => {
+                // 与后端展平口径一致：主镜卡（首卡）只看内容不看 enabled
+                // （主镜 enabled 恒为 true，空主镜不参与）；弹出镜看
+                // enabled/内容。
+                const content = String(s.prompt || "").trim() ||
+                    (s.images || []).length || (s.videos || []).length ||
+                    (s.audios || []).length || s.first_frame || s.last_frame;
+                if (i === 0 ? !!content : (s.enabled || !!content)) count += 1;
+            });
+            return count;
+        }
+        return 0;
+    };
+    for (const composer of composers) {
+        // 分镜序列口支持多连线（分支扩展）：每条入线是一条链，按连线顺序
+        // 依次展平编号。Composer 入口名 shot_group_chain，组/散点 group_in。
+        const inSlot = (composer.inputs || []).find(i => i.name === "shot_group_chain");
+        const linkIds = inSlot?.link != null ? [inSlot.link]
+            : (inSlot?.links || []);
+        for (const linkId of linkIds) {
+            if (linkId == null) continue;
+            const links = app.graph.links;
+            const firstLink = typeof links.get === "function" ? links.get(linkId) : links[linkId];
+            const chainTail = firstLink ? app.graph.getNodeById(firstLink.origin_id) : null;
+            if (!chainTail) continue;
+            // 沿链尾反向收集整条链（链尾在前）：链尾自身也算链成员——
+            // 它才是直接挂在 Composer 上的节点，漏掉它会让整条链的
+            // 激活判定颠倒（直接接编排的节点永远「未接编排」）。
+            const chain = [];
+            let cur = chainTail;
+            const seenChain = new Set();
+            while (cur && !seenChain.has(cur.id)) {
+                seenChain.add(cur.id);
+                chain.push(cur);
+                cur = groupInOf(cur);
+            }
+            chain.reverse(); // 链头在前
+            let run = 0;
+            for (const upstreamNode of chain) {
+                if (activeNodes.has(upstreamNode.id)) continue; // 多分支重复引用：首个激活
+                activeNodes.add(upstreamNode.id);
+                const n = participating(upstreamNode);
+                baseByNode.set(upstreamNode.id, run);
+                run += n;
+            }
+        }
+    }
+    lkgrpNumbering = { stamp: Date.now(), baseByNode, activeNodes };
+}
+
+function createGroupPanel(node) {
+    ensureGroupPanelStyle();
+    const stateKey = "gh_h3_group_state";
+    const groupJsonWidget = (node.widgets || []).find(w => w.name === "group_json");
+    const defaultShot = () => ({
+        duration: 5, prompt: "", audio_mode: "", loras: [],
+        images: [], videos: [], audios: [], first_frame: "", last_frame: "",
+        inherit_refs: true, enabled: false, expanded: false,
+    });
+    let shots = [defaultShot(), defaultShot(), defaultShot()];
+    let restoring = false;
+    let restoreEpoch = 0;
+    let epochAtRestoreStart = 0;
+    let syncTimer = null;
+    let loras = [];
+    let rootEl = null;
+    let panelWidget = null;
+    // （高度改为状态估算，见 estimateHeight）
+
+    const snapshot = () => JSON.parse(JSON.stringify({ shots }));
+
+    const parseGroupState = (strict) => {
+        let raw = node.properties?.[stateKey];
+        if ((!raw || !strict) && groupJsonWidget?.value) {
+            try { raw = JSON.parse(groupJsonWidget.value); } catch { raw = null; }
+        }
+        let parsed = null;
+        try { parsed = typeof raw === "string" ? JSON.parse(raw) : raw; } catch { parsed = null; }
+        const rows = parsed?.shots;
+        if (!Array.isArray(rows)) {
+            if (!strict) shots = [defaultShot(), defaultShot(), defaultShot()];
+            return false;
+        }
+        const clamp = (value, low, high, fallback) => {
+            const numeric = Math.round(Number(value));
+            return Number.isFinite(numeric) ? Math.max(low, Math.min(high, numeric)) : fallback;
+        };
+        // normalizeRow（结构照搬 lanxi normalizeSegment）：逐字段类型收敛 +
+        // 钳制 + 过滤，手改 group_json 也不会让面板出现坏值。
+        const normalizeRow = (raw, index) => {
+            const row = raw && typeof raw === "object" ? raw : {};
+            const audio = typeof row.audio_mode === "string" ? row.audio_mode.trim().toLowerCase() : "";
+            return {
+                duration: clamp(row.duration, 2, 30, 5),
+                prompt: String(row.prompt || ""),
+                audio_mode: ["lock_source", "reference_only", "native"].includes(audio) ? audio : "",
+                loras: (Array.isArray(row.loras) ? row.loras : [])
+                    .map(item => typeof item === "string"
+                        ? { name: item, strength_model: 1 }
+                        : { name: String(item?.name || ""),
+                            strength_model: Math.max(-10, Math.min(10, Number(item?.strength_model) || 1)) })
+                    .filter(item => item.name).slice(0, GROUP_MAX_LORAS),
+                images: (Array.isArray(row.images) ? row.images : [])
+                    .map(item => String(item || "").trim()).filter(Boolean),
+                videos: (Array.isArray(row.videos) ? row.videos : [])
+                    .map(item => String(item || "").trim()).filter(Boolean),
+                audios: (Array.isArray(row.audios) ? row.audios : [])
+                    .map(item => String(item || "").trim()).filter(Boolean),
+                first_frame: String(row.first_frame || "").trim(),
+                last_frame: String(row.last_frame || "").trim(),
+                inherit_refs: row.inherit_refs !== false,
+                enabled: index === 0 ? true : !!row.enabled,
+                expanded: index === 0 ? true : !!row.expanded,
+            };
+        };
+        shots = [0, 1, 2].map((i) => normalizeRow(rows[i], i));
+        return true;
+    };
+
+    const syncGroupJson = () => {
+        if (restoring) return;
+        const payload = JSON.stringify(snapshot());
+        if (groupJsonWidget) groupJsonWidget.value = payload;
+        node.properties = node.properties || {};
+        node.properties[stateKey] = JSON.parse(payload);
+    };
+    const scheduleSync = () => {
+        if (restoring) return;
+        if (syncTimer) clearTimeout(syncTimer);
+        syncTimer = setTimeout(syncGroupJson, 250);
+    };
+
+    const el = (tag, cls, text) => {
+        const e = document.createElement(tag);
+        if (cls) e.className = cls;
+        if (text !== undefined) e.textContent = text;
+        return e;
+    };
+    // 面板高度按状态确定性估算（卡片头 36 / 展开体 = 提示词 100 + 行 26 /
+    // 加钮 30 / 提示 20 / 卡距 8 / 底部 42），不依赖运行时测量。
+    const estimateHeight = () => {
+        let h = 14;
+        for (const shot of shots) {
+            h += 36;
+            if (shot.expanded) {
+                h += 100;
+                h += shot.loras.length * 26 + 30;
+                if (shot !== shots[0]) h += 20;
+            }
+            h += 8;
+        }
+        h += 42;
+        return Math.max(150, h);
+    };
+    let fitScheduled = false;
+    const fit = () => {
+        if (!node.graph || fitScheduled) return; // createNode 阶段未入图：布局由 onAdded 补
+        fitScheduled = true;
+        requestAnimationFrame(() => {
+            fitScheduled = false;
+            if (!node.graph) return;
+            try {
+                node.setSize?.([GROUP_PANEL_WIDTH, estimateHeight() + 8]);
+                app.graph.setDirtyCanvas?.(true, true);
+            } catch { /* 未入图阶段静默 */ }
+        });
+    };
+    const measure = () => {
+        if (!rootEl) return;
+        fit();
+    };
+
+    // 全局序号：沿 上游分镜组 连线回溯，统计链上位于本组之前的参与镜数
+    // （散点 = 1 镜；组 = enabled/有内容的镜数；成环或断线即停）。
+    // 全局序号：查 Composer 权威编号引擎。本组不在任何 Composer 主链上
+    // （未激活）→ 返回 null → 徽章回落组内号；激活 → 上游链前镜数。
+    const countShotsBefore = () => {
+        if (!lkgrpNumbering.activeNodes.has(node.id)) return null;
+        return lkgrpNumbering.baseByNode.get(node.id) ?? 0;
+    };
+    let lastUpstreamShots = null;
+    let dragInProgress = false;
+    // 粘贴上传目标：最近点击/编辑的卡（默认主镜）。剪贴板里的图片直接
+    // 进入该卡的参考列表——截图类参考无需经过文件选择框。
+    let activeCardIndex = 0;
+    const myToken = Symbol();
+    const handlePasteImage = async (ev) => {
+        if (restoring) return;
+        // 焦点驱动：提示词栏（或任何输入框）处于输入状态 = 这次粘贴是文字，
+        // 完全交给默认行为——即使剪贴板是"文字+图片"混合内容也不拦截上传
+        // （否则文字会被错误吞掉）。非输入状态才尝试粘贴图片进参考列表。
+        const target = ev.target;
+        const inTextEntry = target instanceof HTMLTextAreaElement
+            || target instanceof HTMLInputElement
+            || (target && target.isContentEditable);
+        if (inTextEntry) return;
+        const items = ev.clipboardData?.items;
+        if (!items) return;
+        const imageItem = [...items].find(it => it.kind === "file" && it.type.startsWith("image/"));
+        if (!imageItem) return; // 剪贴板无图片：不拦截
+        // 仲裁：只有最近活跃的分镜组面板响应这一次粘贴（10s 活跃度门槛，
+        // 超时放行给 ComfyUI 原生的画布图片粘贴）。
+        if (lkgrpActiveToken !== myToken) return;
+        if (Date.now() - lkgrpActiveTs > 10000) return;
+        ev.preventDefault(); ev.stopPropagation();
+        const file = imageItem.getAsFile();
+        if (!file) return;
+        try {
+            // 专用子目录：绝不与 ComfyUI 原生粘贴目录（input/pasted/）或
+            // 其他来源混用——清理时不存在归属歧义。
+            const name = await uploadFile(file, "LK_paste");
+            const shot = shots[activeCardIndex];
+            if (!shot) return;
+            shot.images.push(name);
+            scheduleSync(); render();
+        } catch (error) {
+            console.warn("[MiniMax H3 Integration] 粘贴上传失败:", error);
+        }
+    };
+    document.addEventListener("paste", handlePasteImage, true);
+
+    const renderCard = (shot, index, globalNo, globalActive) => {
+        const main = index === 0;
+        const card = el("div", "lkgrp-card" + (shot.expanded ? "" : " lkgrp-collapsed"));
+        // 粘贴目标追踪：点击/编辑某卡时它成为粘贴目标
+        card.addEventListener("pointerdown", () => {
+            activeCardIndex = index;
+            lkgrpActiveToken = myToken;
+            lkgrpActiveTs = Date.now();
+        }, true);
+        const head = el("div", "lkgrp-head");
+        const badge = el("span", "lkgrp-badge",
+            globalActive ? `分镜 ${globalNo}` : `分镜 ${index + 1}（未接编排）`);
+        if (!globalActive) badge.style.color = "#8298a9";
+        badge.draggable = true;
+        badge.title = "拖拽徽章可与其它分镜卡换序";
+        if (main) {
+            const tag = el("span", "lkgrp-main-tag", "主");
+            badge.appendChild(tag);
+        }
+        // 卡序拖拽：徽章拖起，落到目标卡上换序（shots 数组 splice）
+        badge.addEventListener("dragstart", ev => {
+            dragInProgress = true;
+            ev.dataTransfer.setData("text/lkgrp-shot", JSON.stringify({ idx: index, nodeId: node.id }));
+            ev.dataTransfer.effectAllowed = "move";
+        });
+        badge.addEventListener("dragend", () => { dragInProgress = false; });
+        card.addEventListener("dragover", ev => {
+            if ([...ev.dataTransfer.types].includes("text/lkgrp-shot")) {
+                ev.preventDefault();
+                ev.stopPropagation();
+                card.classList.add("lkgrp-drop-target");
+            }
+        });
+        card.addEventListener("dragleave", () => card.classList.remove("lkgrp-drop-target"));
+        card.addEventListener("drop", ev => {
+            ev.preventDefault(); ev.stopPropagation();
+            card.classList.remove("lkgrp-drop-target");
+            let src = null;
+            try { src = JSON.parse(ev.dataTransfer.getData("text/lkgrp-shot") || "null"); } catch { src = null; }
+            if (!src) return;
+            if (src.nodeId !== node.id) return; // 跨节点拖拽：忽略（各自组内排序）
+            if (src.idx === index) return;
+            const moved = shots.splice(src.idx, 1)[0];
+            if (!moved) return;
+            shots.splice(index, 0, moved);
+            scheduleSync(); render();
+        });
+        head.appendChild(badge);
+        const duration = el("input");
+        duration.type = "number"; duration.min = "2"; duration.max = "30"; duration.step = "1";
+        duration.value = shot.duration;
+        duration.title = "时长（秒）";
+        duration.addEventListener("change", () => {
+            shot.duration = Math.max(2, Math.min(30, Math.round(Number(duration.value) || 5)));
+            duration.value = shot.duration;
+            scheduleSync();
+        });
+        head.appendChild(duration);
+        duration.style.display = "none";
+        // 步进器（结构照搬 lanxi number 控件）：◀ 值 ▶
+        const durWrap = el("div", "lkgrp-number");
+        durWrap.title = "时长（秒）";
+        const durInput = el("input");
+        durInput.type = "number"; durInput.min = "2"; durInput.max = "30";
+        durInput.value = shot.duration;
+        const setDuration = value => {
+            shot.duration = Math.max(2, Math.min(30, Math.round(Number(value)) || 5));
+            durInput.value = Number.isInteger(shot.duration) ? shot.duration : shot.duration.toFixed(2);
+            scheduleSync();
+        };
+        const leftB = el("button", undefined, "\u25C0");
+        leftB.addEventListener("click", () => setDuration(Number(durInput.value || 2) - 1));
+        const rightB = el("button", undefined, "\u25B6");
+        rightB.addEventListener("click", () => setDuration(Number(durInput.value || 2) + 1));
+        durInput.addEventListener("change", () => setDuration(durInput.value));
+        durWrap.append(leftB, durInput, rightB);
+        head.insertBefore(durWrap, head.querySelector("select"));
+        const audioSel = el("select");
+        for (const [key, text] of GROUP_AUDIO_MODES) {
+            const opt = el("option", undefined, text); opt.value = key;
+            audioSel.appendChild(opt);
+        }
+        audioSel.value = shot.audio_mode || "";
+        audioSel.title = "音频参考模式：本镜生成的音频如何对待参考音频（跟随编排 = 沿用编排节点的全局设置）";
+        head.appendChild(el("span", "lkgrp-label", "音频参考模式"));
+        audioSel.addEventListener("change", () => { shot.audio_mode = audioSel.value; scheduleSync(); });
+        head.appendChild(audioSel);
+        head.appendChild(el("span", "lkgrp-spacer"));
+        if (!main) {
+            const inheritSel = el("select");
+            for (const [value, text] of [["inherit", "继承主分镜"], ["own", "独立"]]) {
+                const opt = el("option", undefined, text); opt.value = value;
+                inheritSel.appendChild(opt);
+            }
+            inheritSel.value = shot.inherit_refs ? "inherit" : "own";
+            inheritSel.title = "参考内容：本镜的参考图/视频/音频沿用主分镜（继承主分镜）还是用按钮上传的独立参考（独立）";
+            head.appendChild(el("span", "lkgrp-label", "参考内容"));
+            inheritSel.addEventListener("change", () => {
+                shot.inherit_refs = inheritSel.value === "inherit";
+                scheduleSync();
+            });
+            head.appendChild(inheritSel);
+        }
+        const toggle = el("button", "lkgrp-toggle", shot.expanded ? "▲" : "▼");
+        toggle.addEventListener("click", () => {
+            shot.expanded = !shot.expanded;
+            if (shot.expanded && !main) shot.enabled = true;
+            syncGroupJson();
+            render();
+        });
+        head.appendChild(toggle);
+        card.appendChild(head);
+
+        if (shot.expanded) {
+            const body = el("div", "lkgrp-body");
+            const prompt = el("textarea", "lkgrp-prompt");
+            prompt.placeholder = "分段提示词（叠加在全片提示词之后）…";
+            prompt.value = shot.prompt;
+            prompt.addEventListener("focus", () => {
+                activeCardIndex = index;
+                lkgrpActiveToken = myToken;
+                lkgrpActiveTs = Date.now();
+            });
+            prompt.addEventListener("input", () => { shot.prompt = prompt.value; scheduleSync(); });
+            body.appendChild(prompt);
+
+            const loraBox = el("div", "lkgrp-chips");
+            shot.loras.forEach((lora, li) => {
+                const row = el("div", "lkgrp-row");
+                row.appendChild(el("span", "lkgrp-label", `LoRA${li + 1}`));
+                const sel = el("select");
+                for (const name of (loras.length ? loras : [lora.name])) {
+                    const opt = el("option", undefined, name); opt.value = name;
+                    sel.appendChild(opt);
+                }
+                sel.value = lora.name;
+                sel.addEventListener("change", () => { lora.name = sel.value; scheduleSync(); });
+                row.appendChild(sel);
+                const strength = el("input");
+                strength.type = "number"; strength.min = "-10"; strength.max = "10"; strength.step = "0.05";
+                strength.value = lora.strength_model; strength.title = "强度";
+                strength.addEventListener("change", () => {
+                    lora.strength_model = Math.max(-10, Math.min(10, Number(strength.value) || 0));
+                    scheduleSync();
+                });
+                row.appendChild(strength);
+                const x = el("button", "lkgrp-x", "×"); x.title = "移除";
+                x.addEventListener("click", () => { shot.loras.splice(li, 1); scheduleSync(); render(); });
+                row.appendChild(x);
+                loraBox.appendChild(row);
+            });
+            if (shot.loras.length < GROUP_MAX_LORAS) {
+                const addLora = el("button", "lkgrp-chip", "＋LoRA");
+                addLora.addEventListener("click", () => {
+                    shot.loras.push({ name: loras[0] || "", strength_model: 1.0 });
+                    scheduleSync(); render();
+                });
+                loraBox.appendChild(addLora);
+            }
+            body.appendChild(loraBox);
+
+            {
+                // 媒体上传区（lanxi 操作台按钮驱动方式）：所有镜都可按钮上传
+                const mediaBox = el("div", "lkgrp-chips");
+                const mediaChips = el("div", "lkgrp-chips");
+                const chipRemove = (chip, list, idx) => {
+                    chip.className = "lkgrp-chip";
+                    chip.style.color = "#ffb0b0";
+                    chip.textContent = "× " + chip.textContent;
+                    chip.addEventListener("click", ev => {
+                        ev.stopPropagation();
+                        list.splice(idx, 1);
+                        scheduleSync(); render();
+                    });
+                };
+                const wireMediaDrag = (chip, kind, idx) => {
+                    chip.draggable = true;
+                    chip.classList.add("lkgrp-mchip");
+                    chip.addEventListener("dragstart", ev => {
+                        dragInProgress = true;
+                        ev.dataTransfer.setData("text/lkgrp-media", JSON.stringify({ kind, idx, nodeId: node.id }));
+                        ev.dataTransfer.effectAllowed = "move";
+                    });
+                    chip.addEventListener("dragend", () => { dragInProgress = false; });
+                    chip.addEventListener("dragover", ev => {
+                        if ([...ev.dataTransfer.types].includes("text/lkgrp-media")) {
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            chip.classList.add("lkgrp-drop-target");
+                        }
+                    });
+                    chip.addEventListener("dragleave", () => chip.classList.remove("lkgrp-drop-target"));
+                    chip.addEventListener("drop", ev => {
+                        ev.preventDefault(); ev.stopPropagation();
+                        chip.classList.remove("lkgrp-drop-target");
+                        let src = null;
+                        try { src = JSON.parse(ev.dataTransfer.getData("text/lkgrp-media") || "null"); } catch { src = null; }
+                        if (!src || src.nodeId !== node.id) return; // 跨组拖拽：忽略
+                        if (src.kind !== kind || src.idx === idx) return;
+                        const list = shot[kind];
+                        const moved = list.splice(src.idx, 1)[0];
+                        if (!moved) return;
+                        list.splice(idx, 0, moved);
+                        scheduleSync(); render();
+                    });
+                };
+                shot.images.forEach((name, idx) => {
+                    const chip = el("button", "lkgrp-chip lkgrp-mchip", "🖼 " + name.split("/").pop());
+                    chip.title = "拖拽可排序，点击 × 移除";
+                    chipRemove(chip, shot.images, idx);
+                    wireMediaDrag(chip, "images", idx);
+                    mediaChips.appendChild(chip);
+                });
+                shot.videos.forEach((name, idx) => {
+                    const chip = el("button", "lkgrp-chip lkgrp-mchip", "🎬 " + name.split("/").pop());
+                    chip.title = "拖拽可排序，点击 × 移除";
+                    chipRemove(chip, shot.videos, idx);
+                    wireMediaDrag(chip, "videos", idx);
+                    mediaChips.appendChild(chip);
+                });
+                shot.audios.forEach((name, idx) => {
+                    const chip = el("button", "lkgrp-chip lkgrp-mchip", "🔊 " + name.split("/").pop());
+                    chip.title = "拖拽可排序，点击 × 移除";
+                    chipRemove(chip, shot.audios, idx);
+                    wireMediaDrag(chip, "audios", idx);
+                    mediaChips.appendChild(chip);
+                });
+                if (shot.first_frame) {
+                    const chip = el("button", "lkgrp-chip", "首帧 " + shot.first_frame.split("/").pop());
+                    chip.style.color = "#ffb0b0";
+                    chip.addEventListener("click", ev => {
+                        ev.stopPropagation();
+                        shot.first_frame = "";
+                        scheduleSync(); render();
+                    });
+                    mediaChips.appendChild(chip);
+                }
+                if (shot.last_frame) {
+                    const chip = el("button", "lkgrp-chip", "尾帧 " + shot.last_frame.split("/").pop());
+                    chip.addEventListener("click", ev => {
+                        ev.stopPropagation();
+                        shot.last_frame = "";
+                        scheduleSync(); render();
+                    });
+                    chip.style.color = "#ffb0b0";
+                    mediaChips.appendChild(chip);
+                }
+                if (mediaChips.childElementCount) body.appendChild(mediaChips);
+                const pickers = [
+                    ["＋图片", "image/*", "images"],
+                    ["＋视频", "video/*", "videos"],
+                    ["＋音频", "audio/*", "audios"],
+                    ["＋首帧", "image/*", "first"],
+                    ["＋尾帧", "image/*", "last"],
+                ];
+                const pickerRow = el("div", "lkgrp-chips");
+                for (const [label, accept, target] of pickers) {
+                    const btn = el("button", "lkgrp-chip", label);
+                    btn.addEventListener("click", () => {
+                        const input = document.createElement("input");
+                        input.type = "file"; input.accept = accept;
+                        input.addEventListener("change", async () => {
+                            const file = input.files?.[0];
+                            if (!file) return;
+                            try {
+                                const name = await uploadFile(file);
+                                if (target === "first") shot.first_frame = name;
+                                else if (target === "last") shot.last_frame = name;
+                                else shot[target].push(name);
+                                scheduleSync(); render();
+                            } catch (error) {
+                                console.warn("[MiniMax H3 Integration] 上传失败:", error);
+                            }
+                        });
+                        input.click();
+                    });
+                    pickerRow.appendChild(btn);
+                }
+                mediaBox.appendChild(pickerRow);
+                body.appendChild(mediaBox);
+                body.appendChild(el("div", "lkgrp-hint", main
+                    ? "参考：跟随上游链上下文（默认）。点击卡片后在空白处 Ctrl+V 粘贴截图进参考（提示词框内粘贴 = 文字），独立参考优先于继承。"
+                    : "参考：继承主分镜（与主分镜相同）。点击卡片后在空白处 Ctrl+V 粘贴截图进参考（提示词框内粘贴 = 文字），独立参考优先于继承。"));
+            }
+            card.appendChild(body);
+        }
+        return card;
+    };
+
+    const render = () => {
+        if (!rootEl) return;
+        rootEl.replaceChildren();
+        // 全局序号：上游参与镜数 + 本组内前序参与镜数；未参与卡不占号。
+        // 本组未挂 Composer 主链（激活外）→ globalActive=false → 组内号。
+        const globalActive = lkgrpNumbering.activeNodes.has(node.id);
+        const upstreamShots = globalActive
+            ? (lkgrpNumbering.baseByNode.get(node.id) ?? 0) : 0;
+        let run = upstreamShots;
+        const numbers = shots.map((shot, i) => {
+            const content = String(shot.prompt || "").trim() || (shot.images || []).length ||
+                (shot.videos || []).length || (shot.audios || []).length ||
+                shot.first_frame || shot.last_frame;
+            const part = i === 0 ? !!content : (shot.enabled || !!content);
+            if (part) { run += 1; return run; }
+            return null;
+        });
+        shots.forEach((shot, index) => rootEl.appendChild(renderCard(
+            shot, index,
+            globalActive ? (numbers[index] || index + 1) : index + 1,
+            globalActive,
+        )));
+        const nextDisabled = shots.findIndex((shot, i) => i > 0 && !shot.enabled);
+        if (nextDisabled > 0) {
+            const add = el("button", "lkgrp-add", "＋ 添加分镜");
+            add.addEventListener("click", () => {
+                const shot = shots[nextDisabled];
+                shot.enabled = true;
+                shot.expanded = true;
+                syncGroupJson();
+                render();
+            });
+            rootEl.appendChild(add);
+        } else {
+            rootEl.appendChild(el("div", "lkgrp-hint", "已达 3 镜上限（一个项目束分镜组最多 3 镜；需要更多请再拖一个分镜组首尾相接）。"));
+        }
+        measure();
+    };
+
+    const PANEL_WIDGET_NAME = "分镜组面板";
+    const ensureWidget = () => {
+        // widget-store 重建会产生同名副本/拆下根节点：按名复用 + 清理副本。
+        const byName = (node.widgets || []).filter(w => w.name === PANEL_WIDGET_NAME);
+        for (let i = byName.length - 1; i >= 1; i--) {
+            const idx = node.widgets.indexOf(byName[i]);
+            if (idx >= 0) node.widgets.splice(idx, 1);
+        }
+        const existing = byName.find(w => w._lkgrpRoot);
+        // 重建壳（同名但无 _lkgrpRoot）一律移除，避免每次 store 同步累积副本
+        for (const shell of byName) {
+            if (shell !== existing) {
+                const idx = node.widgets.indexOf(shell);
+                if (idx >= 0) node.widgets.splice(idx, 1);
+            }
+        }
+        if (existing && existing._lkgrpRoot) {
+            panelWidget = existing;
+            rootEl = existing._lkgrpRoot;
+            if (!rootEl.isConnected) {
+                const container = existing.inputEl?.parentElement
+                    || existing.domElement?.parentElement
+                    || existing.element?.parentElement;
+                if (container) container.appendChild(rootEl);
+            }
+            return;
+        }
+        rootEl = document.createElement("div");
+        rootEl.className = "lkgrp-root";
+        // 显式像素宽度：DOM-widget 容器在恢复期会瞬时报窄/归零（lanxi 同款
+        // 坑），显式 px 宽度保证面板不被压塌。
+        rootEl.style.width = "448px";
+        rootEl.style.minWidth = "448px";
+        panelWidget = node.addDOMWidget(PANEL_WIDGET_NAME, "lkgrp_panel", rootEl,
+            { serialize: false, hideOnZoom: false });
+        // lanxi 操作台结构：容器高度交给管理器（getHeight 100%），节点高度
+        // 由面板自行 setSize 管理；computeSize 只固定宽度。
+        panelWidget.options = panelWidget.options || {};
+        panelWidget.options.serialize = false;
+        panelWidget.options.getMinHeight = () => 150;
+        panelWidget.options.getHeight = () => "100%";
+        panelWidget.options.minNodeSize = [GROUP_PANEL_WIDTH, 0];
+        panelWidget._ghh3Group = true;
+        panelWidget._lkgrpRoot = rootEl;
+
+        render();
+    };
+    ensureWidget();
+
+    const refreshLibraries = async () => {
+        loras = await fetchGroupLoras();
+        render();
+    };
+
+    const tryRestore = (attempt = 0) => {
+        if (restoreEpoch !== epochAtRestoreStart) return; // 更新的恢复已接管
+        parseGroupState(true);
+        render();
+        if (attempt >= 3) {
+            restoring = false;
+            refreshLibraries();
+            return;
+        }
+        setTimeout(() => {
+            if (!restoring || restoreEpoch !== epochAtRestoreStart) return;
+            tryRestore(attempt + 1);
+        }, 300);
+    };
+
+    const baseComputeSize = node.computeSize.bind(node);
+    node.computeSize = function(out) {
+        const measured = baseComputeSize(out);
+        measured[0] = GROUP_PANEL_WIDTH;
+        return measured;
+    };
+    parseGroupState(false);
+    render();
+    // 生成瞬间同步定宽（前端会先写一个 270 宽的默认尺寸，绕过 setSize；
+    // 高度随卡片展开由 fit 持续修正）。
+    node.size = [GROUP_PANEL_WIDTH, estimateHeight() + 8];
+    refreshLibraries();
+
+    const watchdog = setInterval(() => {
+        if (restoring) return;
+        const widgetAlive = (node.widgets || []).some(w => w.name === "分镜组面板");
+        if (!widgetAlive) { ensureWidget(); return; }
+        // 宽度再断言：前端恢复/同步可能把节点宽度重置回窄值，这里自愈
+        if (node.size && node.size[0] < GROUP_PANEL_WIDTH) {
+            node.setSize?.([GROUP_PANEL_WIDTH, Math.max(node.size[1], estimateHeight() + 8)]);
+        }
+        // 编号引擎刷新（Composer 侧正向遍历）→ 本组激活态或基准号漂移
+        // → 刷新徽章（连线/断线/分支/上游增删镜都在此通道生效）
+        lkgrpRefreshNumbering();
+        const upstreamShots = countShotsBefore();
+        if (upstreamShots !== lastUpstreamShots) {
+            lastUpstreamShots = upstreamShots;
+            render();
+        }
+    }, 2500);
+
+    return {
+        onAdded() {
+            // 入图后补一次布局（创建阶段 graph 为 null 时 fit 被跳过）。
+            setTimeout(() => { ensureWidget(); fit(); }, 0);
+        },
+        onConfigure() {
+            restoring = true;
+            restoreEpoch += 1;
+            epochAtRestoreStart = restoreEpoch;
+            setTimeout(() => tryRestore(), 0);
+        },
+        onGraphConfigured() {
+            restoring = true;
+            restoreEpoch += 1;
+            epochAtRestoreStart = restoreEpoch;
+            setTimeout(() => tryRestore(), 0);
+        },
+        onRemoved() {
+            clearInterval(watchdog);
+            if (syncTimer) clearTimeout(syncTimer);
+            document.removeEventListener("paste", handlePasteImage, true);
+        },
+        onSerialize(serializedNode) {
+            syncGroupJson();
+            serializedNode.properties = serializedNode.properties || {};
+            serializedNode.properties[stateKey] = snapshot();
+        },
+    };
+}
+
+
+// ── Schema widget 纠偏看门狗 ──────────────────────────────────────────
+// 1.57.x widget-store 同步会按 schema 重建 node.widgets：重建后的 widget
+// 渲染 schema 默认值，却不写回 widgets_values 数组——而数组才是队列/保存
+// 时真正发往后台的值（实例：release_clip 显示 false、序列化 true，TE 热
+// 重载退化就这样静默发生）。在配置/重建窗口内把 widget 显示值向序列化
+// 数组对齐；窗口外绝不碰，避免对抗用户正在进行的编辑。每次纠偏都留痕。
+function resyncSchemaWidgets(node, why) {
+    const values = node.widgets_values;
+    if (!Array.isArray(values)) return;
+    let healed = 0;
+    (node.widgets || []).forEach((widget, index) => {
+        if (!widget || widget.serialize === false) return;
+        if (widget._ghh3Shot || widget._ghh3Group) return; // 面板行由各自看门狗管理
+        if (index >= values.length) return;
+        const truth = values[index];
+        if (truth === null || truth === undefined) return;
+        if (typeof truth !== typeof widget.value) return; // 形状变更交给配置流程
+        if (JSON.stringify(widget.value) === JSON.stringify(truth)) return;
+        if (widget._lkSchemaResynced) return; // 单次纠偏：之后用户的合法编辑不再回退
+        console.warn(
+            `[MiniMax H3 Integration] "${widget.name}" 显示=${JSON.stringify(widget.value)} `
+            + `≠ 序列化=${JSON.stringify(truth)}（${why}）— 已向序列化值纠偏`,
+        );
+        widget.value = truth;
+        widget._lkSchemaResynced = true;
+        try { widget.callback?.(truth); } catch { /* 回调可选 */ }
+        healed += 1;
+    });
+    if (healed) node.setDirtyCanvas?.(true, true);
+}
+
+function scheduleSchemaResync(node, why) {
+    for (const delay of [0, 1000, 3000, 6000]) {
+        setTimeout(() => {
+            if (node.graph) resyncSchemaWidgets(node, why);
+        }, delay);
+    }
+}
+
 const LK_TITLES = {
     LKH3Shot: "MiniMaxH3分镜（LK）",
     LKH3Composer: "MiniMaxH3 长视频编排（LK）",
     LKH3SegmentGuider: "MiniMax-H3 分段引导（LK）",
     LKH3RefineSegments: "MiniMax-H3 二跑分段精修（LK）",
-    LKH3ReferenceFocus: "MiniMax-H3 参考聚焦（LK）",
     LKH3AVUpscale: "MiniMax-H3 AV潜空间放大（LK）",
     LKH3AVDecode: "MiniMax-H3 AV解码（LK）",
 };
@@ -2357,6 +2802,15 @@ app.registerExtension({
             retitle();
             requestAnimationFrame(retitle);
             setTimeout(retitle, 100);
+            // Widget-store 重建风暴窗口：加载后多次纠偏，把重建造成的
+            // "显示=schema默认 / 数组=用户真值" 脱钩压回去。
+            scheduleSchemaResync(this, "工作流配置");
+            return result;
+        };
+        const previousGraphConfigured = nodeType.prototype.onGraphConfigured;
+        nodeType.prototype.onGraphConfigured = function(...args) {
+            const result = previousGraphConfigured?.apply(this, args);
+            scheduleSchemaResync(this, "画布加载");
             return result;
         };
     },

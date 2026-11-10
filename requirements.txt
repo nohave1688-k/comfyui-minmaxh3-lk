@@ -8,8 +8,3 @@ sentencepiece
 transformers>=4.49
 accelerate
 imageio-ffmpeg>=0.6.0
-
-# Optional video loader backends (soft-imported by the RefMod loaders).
-# Install one if "Load H3 RefMod Folder" cannot read your video files.
-# opencv-python
-# imageio

@@ -2,7 +2,7 @@
 
 The original pack exposed these nodes through ``comfy_entrypoint``.  The
 unified pack registers the very same ``io.ComfyNode`` classes through
-``NODE_CLASS_MAPPINGS`` so that ComfyUI can load the RefMod nodes (which use
+``NODE_CLASS_MAPPINGS`` so that ComfyUI can load the nodes (which use
 the V1 node API) from one single extension.
 """
 
